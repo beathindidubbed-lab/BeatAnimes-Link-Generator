@@ -18,8 +18,16 @@ const PORT = process.env.PORT || 3000;
 
 // Admin Configuration
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id)) : [];
-const WELCOME_PHOTO_ID = process.env.WELCOME_PHOTO_ID || null; 
+// WELCOME_PHOTO_ID is now obsolete, replaced by WELCOME_SOURCE_CHANNEL/MESSAGE_ID
 const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME || '@YourChannel'; // Main channel for Force Join
+
+// Customization constants (FOR NEW WELCOME MESSAGE)
+// Using defaults from your provided Python snippet
+const WELCOME_SOURCE_CHANNEL = parseInt(process.env.WELCOME_SOURCE_CHANNEL || '-1002530952988'); 
+const WELCOME_SOURCE_MESSAGE_ID = parseInt(process.env.WELCOME_SOURCE_MESSAGE_ID || '32'); 
+const PUBLIC_ANIME_CHANNEL_URL = process.env.PUBLIC_ANIME_CHANNEL_URL || "https://t.me/BeatAnime";
+const REQUEST_CHANNEL_URL = process.env.REQUEST_CHANNEL_URL || "https://t.me/Beat_Hindi_Dubbed";
+const ADMIN_CONTACT_USERNAME = process.env.ADMIN_CONTACT_USERNAME || "Beat_Anime_Ocean"; 
 
 // Link Limits Configuration (Monetization)
 const LINK_LIMITS = {
@@ -113,7 +121,7 @@ function formatFileSize(bytes) {
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+    return Math.round(bytes / Math.pow(k, i) / 100 + ' ' + sizes[i];
 }
 
 function formatUptime(seconds) {
@@ -257,7 +265,30 @@ function getForceJoinKeyboard() {
     };
 }
 
+// **NEW** Custom Welcome Keyboard (Replaces the default welcome message UI)
+function getCustomWelcomeKeyboard(isAdminUser) {
+    // Add "Go to Bot Features" button to access /stats, /files, etc.
+    let keyboard = [
+        [{ text: "ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url: PUBLIC_ANIME_CHANNEL_URL }],
+        [{ text: "ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ", url: `https://t.me/${ADMIN_CONTACT_USERNAME}` }],
+        [{ text: "ʀᴇǫᴜᴇsᴛ ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url: REQUEST_CHANNEL_URL }],
+        [
+            { text: "ᴀʙᴏᴜᴛ ᴍᴇ", callback_data: "about_bot" },
+            { text: "ᴄʟᴏsᴇ", callback_data: "close_message" }
+        ],
+        [{ text: "➡️ Go to Bot Features", callback_data: "start_features" }]
+    ];
+
+    if (isAdminUser) {
+        keyboard.push([{ text: "👑 Admin Panel", callback_data: "admin_panel" }]);
+    }
+    
+    return { inline_keyboard: keyboard };
+}
+
+
 function getMainKeyboard(isAdmin = false) {
+    // This is the keyboard for the core bot features (stats, files, premium, etc.)
     const keyboard = [
         [
             { text: '📊 My Stats', callback_data: 'my_stats' },
@@ -278,8 +309,12 @@ function getMainKeyboard(isAdmin = false) {
         ]);
     }
     
+    // Add a back button to the custom welcome screen
+    keyboard.push([{ text: '🔙 Back to Welcome', callback_data: 'user_back' }]);
+    
     return { inline_keyboard: keyboard };
 }
+
 
 function getAdminKeyboard() {
     const isBroadcasting = BROADCAST_STATUS.isSending;
@@ -304,7 +339,7 @@ function getAdminKeyboard() {
                 { text: `🔗 Set Join Channel (Current: ${currentChannel})`, callback_data: 'admin_set_join_channel' }
             ],
             [
-                { text: '🔙 Back', callback_data: 'start' }
+                { text: '🔙 Back', callback_data: 'start_features' } // Back to Main Bot Features menu
             ]
         ]
     };
@@ -353,6 +388,7 @@ function getFileActionsKeyboard(fileId, userType) {
     };
 }
 
+// **OLD FUNCTION - KEEPING FOR FORCE JOIN FALLBACK TEXT**
 function getWelcomeText(userId, firstName, isMember = true) {
     const user = USER_DATABASE.get(userId) || registerUser(userId, null, firstName); 
     const limitCheck = canGenerateLink(userId);
@@ -390,12 +426,15 @@ function getHelpText() {
 - **PREMIUM:** You can upload ${LINK_LIMITS.PREMIUM} files. Links are **PERMANENT**.
 
 <b>3. Commands:</b>
-- /start: Open the main menu.
-- /help: Show this guide.
-- /stats: Check your limits and file usage.
-- /files: Manage your uploaded links (rename, delete, etc.).
-- /premium or /upgrade: Learn about premium benefits.
-- /referral: Get your referral link for bonus slots.
+- /start: Open custom welcome.
+- /help: Show bot guide.
+- /stats: Check limits, usage.
+- /files: Manage uploaded links.
+- /premium or /upgrade: See upgrade details.
+- /referral: Get referral link.
+- /admin: Open admin panel ...[ADMIN]
+- /broadcast: Start mass message ...[ADMIN]
+- /cleanup: Run maintenance job ...[ADMIN]
 
 <b>4. Important:</b>
 - You must remain a member of ${CHANNEL_USERNAME} to use the bot.
@@ -435,6 +474,16 @@ Invite friends and earn free link slots!
 
 Share this link everywhere!
     `;
+}
+
+// **NEW** About Bot Text
+function getAboutText() {
+    return `
+<b>About Us</b>
+
+Developed by @${ADMIN_CONTACT_USERNAME}
+This bot is designed to create permanent streaming and download links for media files shared on Telegram.
+`;
 }
 
 
@@ -589,20 +638,35 @@ const handleStartCommand = async (msg, match) => {
 
     const isMember = await checkMembership(userId);
     
-    const welcomeText = getWelcomeText(userId, firstName, isMember);
-    const keyboard = isMember || isAdmin(userId) ? getMainKeyboard(isAdmin(userId)) : getForceJoinKeyboard();
+    // If not a member, show force join screen
+    if (!isMember && !isAdmin(userId)) {
+        const welcomeText = getWelcomeText(userId, firstName, isMember);
+        const keyboard = getForceJoinKeyboard();
+        return bot.sendMessage(chatId, welcomeText, { 
+            parse_mode: 'HTML', 
+            reply_markup: keyboard 
+        });
+    }
 
-    // Send photo/text welcome message
-    if (WELCOME_PHOTO_ID) {
-        try {
-            await bot.sendPhoto(chatId, WELCOME_PHOTO_ID, {
-                caption: welcomeText, parse_mode: 'HTML', reply_markup: keyboard
-            });
-        } catch (error) {
-            await bot.sendMessage(chatId, welcomeText, { parse_mode: 'HTML', reply_markup: keyboard });
-        }
-    } else {
-        await bot.sendMessage(chatId, welcomeText, { parse_mode: 'HTML', reply_markup: keyboard });
+    // If member, show custom welcome screen (copy message)
+    const customKeyboard = getCustomWelcomeKeyboard(isAdmin(userId));
+
+    try {
+        // Attempt to copy the message
+        await bot.copyMessage(
+            chatId,
+            WELCOME_SOURCE_CHANNEL,
+            WELCOME_SOURCE_MESSAGE_ID,
+            { reply_markup: customKeyboard }
+        );
+    } catch (error) {
+        // Handle failure by sending a fallback text message
+        console.error(`Error copying welcome message: ${error.message}`);
+        const fallback_text = `👋 <b>Welcome to the bot!</b>\n\nUse the buttons below to navigate or send me a file to get started.`;
+        await bot.sendMessage(chatId, fallback_text, { 
+            parse_mode: 'HTML', 
+            reply_markup: customKeyboard 
+        });
     }
 };
 
@@ -614,9 +678,9 @@ bot.onText(/\/(help|stats|files|admin|premium|upgrade|referral|broadcast|cleanup
     const userId = msg.from.id;
     const chatId = msg.chat.id;
     
-    // Admin checks for admin-specific commands
+    // **Admin check with custom message**
     if (['admin', 'broadcast', 'cleanup'].includes(command) && !isAdmin(userId)) {
-        return bot.sendMessage(chatId, '❌ You are not authorized to use this command.', { parse_mode: 'Markdown' });
+        return bot.sendMessage(chatId, '❌ You are not authorized to use this command. It is not for you cutie.', { parse_mode: 'Markdown' });
     }
 
     // Force Join Check for non-admin, non-start/help commands
@@ -633,14 +697,14 @@ bot.onText(/\/(help|stats|files|admin|premium|upgrade|referral|broadcast|cleanup
 
     // Trigger the corresponding callback flow
     let callbackData;
-    let isCommandOnly = false; // Flag for commands that don't need the dummy callback trigger
+    let isCommandOnly = false; 
     switch (command) {
         case 'help':
             const helpText = getHelpText();
             await bot.sendMessage(chatId, helpText, { 
                 parse_mode: 'HTML',
                 disable_web_page_preview: true,
-                reply_markup: { inline_keyboard: [[{ text: '🔙 Back to Main Menu', callback_data: 'start' }]] }
+                reply_markup: { inline_keyboard: [[{ text: '🔙 Back to Welcome', callback_data: 'user_back' }]] }
             });
             isCommandOnly = true;
             break;
@@ -661,12 +725,10 @@ bot.onText(/\/(help|stats|files|admin|premium|upgrade|referral|broadcast|cleanup
             callbackData = 'admin_panel';
             break;
         case 'broadcast':
-            // Starts the multi-step flow
             bot.emit('callback_query', { message: msg, from: msg.from, data: 'admin_broadcast_start', id: 'cmd_broadcast' + Date.now(), chat_instance: 'dummy' });
             isCommandOnly = true;
             return;
         case 'cleanup':
-            // Triggers the maintenance job immediately
             bot.emit('callback_query', { message: msg, from: msg.from, data: 'admin_trigger_cleanup', id: 'cmd_cleanup' + Date.now(), chat_instance: 'dummy' });
             isCommandOnly = true;
             return;
@@ -675,14 +737,10 @@ bot.onText(/\/(help|stats|files|admin|premium|upgrade|referral|broadcast|cleanup
     }
     
     if (!isCommandOnly) {
-        // We simulate a callback query because the core logic is in the callback handler for cleaner UX (editing the message).
-        // Since commands send a new message, the callback handler will fail to edit, but we use the result of the dummy query 
-        // to respond back (usually for simple info like stats).
         const dummyQuery = {
             message: msg, from: msg.from, data: callbackData, 
             id: 'dummy_cmd' + Date.now(), chat_instance: 'dummy' 
         };
-        // This triggers the logic, but the response is handled within the callback query handler if needed.
         bot.emit('callback_query', dummyQuery); 
     }
 });
@@ -704,54 +762,69 @@ bot.on('callback_query', async (query) => {
     }
 
     const isMember = await checkMembership(userId);
-    if (!isMember && !isAdmin(userId) && !['check_join', 'start', 'help', 'premium_info', 'referral_info'].includes(data)) {
+    if (!isMember && !isAdmin(userId) && !['check_join', 'start', 'start_features', 'user_back', 'help', 'premium_info', 'referral_info'].includes(data)) {
         await bot.answerCallbackQuery(query.id, { text: '⚠️ You must join the channel to continue.', show_alert: true });
         return;
     }
 
-    // Function to edit the message, prioritizing caption over text for smoother UX
+    // Function to edit the message
     const editMessage = async (text, keyboard, disablePreview = false) => {
         try {
-            if (query.message.photo || WELCOME_PHOTO_ID) {
-                await bot.editMessageCaption(text, {
-                    chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: disablePreview
-                });
-            } else {
-                await bot.editMessageText(text, {
-                    chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: disablePreview
-                });
-            }
+            await bot.editMessageText(text, {
+                chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: disablePreview
+            });
         } catch (e) {
-            // This handles the case where a /command was used, and we can't edit the message.
-            if (query.id.startsWith('dummy_cmd') || query.id.startsWith('cmd_')) {
+            // Handle edit failure (e.g., if the message was copied media or command-sent message)
+             if (query.message.photo || query.message.video || query.message.animation || query.message.document || query.message.caption) {
+                // If the message contains media, we can't edit it to just text. We must delete and resend.
+                try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
                 await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: disablePreview });
-            } else if (data === 'start') {
-                 // Try to delete the old message and resend fresh /start to fully refresh the menu
-                 try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
-                 bot.emit('message', { ...query.message, text: '/start', from: query.from, chat: { id: chatId } });
+            } else if (query.id.startsWith('dummy_cmd') || query.id.startsWith('cmd_')) {
+                // If it's a dummy callback from a command, send a new message.
+                await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: disablePreview });
             }
         }
     };
-
-    // --- Core Commands ---
-    if (data === 'start') {
-        const memberStatus = await checkMembership(userId);
-        const welcomeText = getWelcomeText(userId, user.firstName, memberStatus);
-        const keyboard = memberStatus || isAdmin(userId) ? getMainKeyboard(isAdmin(userId)) : getForceJoinKeyboard();
-        await editMessage(welcomeText, keyboard);
-    } else if (data === 'help') {
-        // If called via callback, edit the message. If called via command, the onText handler already sent a message.
-        if (!query.id.startsWith('dummy_cmd')) {
-            const helpText = getHelpText();
-            await editMessage(helpText, { inline_keyboard: [[{ text: '🔙 Back to Main Menu', callback_data: 'start' }]] }, true);
+    
+    // --- Custom Welcome Menu Handlers ---
+    if (data === 'start' || data === 'user_back') {
+        // Re-trigger /start command logic to show the welcome media message
+        try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
+        bot.emit('message', { ...query.message, text: '/start', from: query.from, chat: { id: chatId } });
+        return;
+    }
+    
+    // Navigate to the old main menu
+    else if (data === 'start_features') {
+        const welcomeText = getWelcomeText(userId, user.firstName, true);
+        const keyboard = getMainKeyboard(isAdmin(userId));
+        // Use editMessage here since it's navigating away from a media message's caption/keyboard
+        await editMessage(welcomeText, keyboard); 
+    }
+    
+    // Close message (DELETE MESSAGE)
+    else if (data === 'close_message') {
+        try {
+            await bot.deleteMessage(chatId, messageId);
+        } catch (e) {
+            console.warn(`Could not delete message: ${e.message}`);
         }
-    } else if (data === 'premium_info') {
-        const premiumText = getPremiumText();
-        await editMessage(premiumText, { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start' }]] });
-    } else if (data === 'referral_info') {
-        const referralText = getReferralText(userId);
-        await editMessage(referralText, { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start' }]] }, true);
-    } 
+        return bot.answerCallbackQuery(query.id, { text: 'Message closed.', show_alert: false });
+    }
+    
+    // About Bot
+    else if (data === 'about_bot') {
+        const aboutText = getAboutText();
+        const keyboard = { inline_keyboard: [[{ text: "🔙 BACK", callback_data: "user_back" }]] };
+        
+        // Delete the previous welcome message and send the new one
+        try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
+        await bot.sendMessage(chatId, aboutText, { 
+            parse_mode: 'HTML', 
+            reply_markup: keyboard
+        });
+        return bot.answerCallbackQuery(query.id);
+    }
     
     // --- Force Join Check ---
     else if (data === 'check_join') {
@@ -766,6 +839,21 @@ bot.on('callback_query', async (query) => {
         }
     }
 
+    // --- Core Commands ---
+    else if (data === 'help') {
+        // If called via callback, edit the message. 
+        if (!query.id.startsWith('dummy_cmd')) {
+            const helpText = getHelpText();
+            await editMessage(helpText, { inline_keyboard: [[{ text: '🔙 Back to Welcome', callback_data: 'user_back' }]] }, true);
+        }
+    } else if (data === 'premium_info') {
+        const premiumText = getPremiumText();
+        await editMessage(premiumText, { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]] });
+    } else if (data === 'referral_info') {
+        const referralText = getReferralText(userId);
+        await editMessage(referralText, { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]] }, true);
+    } 
+    
     // --- My Stats ---
     else if (data === 'my_stats') {
         const limitCheck = canGenerateLink(userId);
@@ -779,7 +867,7 @@ bot.on('callback_query', async (query) => {
 📈 <b>Total Views on Your Files:</b> ${totalViews}
         `;
         await editMessage(statsText, {
-            inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start' }]]
+            inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]]
         });
     }
 
@@ -793,7 +881,7 @@ bot.on('callback_query', async (query) => {
 
         if (myFiles.length === 0) {
             await editMessage('❌ You have not uploaded any files yet. Send me a video!', {
-                inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start' }]]
+                inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]]
             });
             return bot.answerCallbackQuery(query.id);
         }
@@ -807,7 +895,7 @@ bot.on('callback_query', async (query) => {
         await editMessage(`📁 <b>Your Files</b> (Page ${page + 1} of ${totalPages})\n\n${filesList}`, {
             inline_keyboard: filesToShow.map(f => ([{ text: f.fileName, callback_data: `file_${f.uniqueId}` }]))
                 .concat([navigationRow])
-                .concat([[ { text: '🔙 Back', callback_data: 'start' } ]])
+                .concat([[ { text: '🔙 Back', callback_data: 'start_features' } ]])
         });
     }
     
@@ -855,7 +943,6 @@ Views: ${file.views} | Downloads: ${file.downloads}
             });
         }
     }
-    // ... (other file/admin actions remain the same) ...
     
     // --- Admin Panel Commands ---
     else if (data === 'admin_panel' && isAdmin(userId)) {
