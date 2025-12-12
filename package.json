@@ -1,20 +1,16 @@
 {
-  "name": "telegram-permanent-link-bot",
-  "version": "1.0.0",
-  "description": "Generate permanent streaming links for Telegram videos",
+  "name": "beatanimes-link-bot",
+  "version": "2.0.0",
+  "description": "Advanced Telegram permanent link generator",
   "main": "bot.js",
   "type": "module",
   "scripts": {
-    "start": "node bot.js",
-    "dev": "nodemon bot.js"
+    "start": "node bot.js"
   },
   "dependencies": {
     "node-telegram-bot-api": "^0.66.0",
     "express": "^4.18.2",
     "node-fetch": "^3.3.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
   },
   "engines": {
     "node": ">=18.0.0"
