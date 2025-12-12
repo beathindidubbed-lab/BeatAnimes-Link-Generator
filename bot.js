@@ -209,7 +209,7 @@ Join our channel: ${CHANNEL_USERNAME}
         console.error('❌ Download error:', error);
         res.status(500).send('Error downloading file');
     }
-});
+};
 
 // API endpoints
 app.get('/api/stats', (req, res) => {
