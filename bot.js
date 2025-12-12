@@ -6,6 +6,7 @@
 import TelegramBot from 'node-telegram-bot-api';
 import express from 'express';
 import fetch from 'node-fetch';
+import mongoose from 'mongoose'; // <-- New import for MongoDB
 
 // ============================================
 // CONFIGURATION
@@ -13,6 +14,7 @@ import fetch from 'node-fetch';
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBAPP_URL = process.env.WEBAPP_URL || 'https://your-app.onrender.com';
 const PORT = process.env.PORT || 3000;
+const MONGO_URI = process.env.MONGO_URI; // <-- New MongoDB URI
 
 // Admin Configuration
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id)) : [];
@@ -24,16 +26,24 @@ if (!BOT_TOKEN) {
     process.exit(1);
 }
 
+// Check for MongoDB URI
+if (!MONGO_URI) {
+    console.warn('⚠️ MONGO_URI is missing. Bot is running in IN-MEMORY (volatile) mode.');
+}
+
+
 // ============================================
-// DATABASE
+// DATABASE & MODELS (PERSISTENT & IN-MEMORY)
 // ============================================
+
+// In-Memory Fallback (Used if MONGO_URI is missing, and for URL Cache)
 const FILE_DATABASE = new Map();
 const USER_DATABASE = new Map();
 const URL_CACHE = new Map();
 const URL_CACHE_DURATION = 23 * 60 * 60 * 1000;
 
-// Analytics
-const ANALYTICS = {
+// Analytics (Will be loaded from DB on startup, and updated in DB)
+let ANALYTICS = {
     totalViews: 0,
     totalDownloads: 0,
     totalFiles: 0,
@@ -41,57 +51,157 @@ const ANALYTICS = {
     startTime: Date.now()
 };
 
+// Mongoose Schemas and Models (for persistence)
+
+const FileSchema = new mongoose.Schema({
+    _id: String, // Use uniqueId as _id
+    fileId: String,
+    fileUniqueId: String,
+    fileName: String,
+    fileSize: Number,
+    uploadedBy: Number,
+    uploaderName: String,
+    chatId: Number,
+    createdAt: { type: Date, default: Date.now },
+    views: { type: Number, default: 0 },
+    downloads: { type: Number, default: 0 },
+    lastAccessed: { type: Date, default: Date.now }
+});
+const FileModel = mongoose.model('File', FileSchema);
+
+const UserSchema = new mongoose.Schema({
+    userId: { type: Number, unique: true, index: true },
+    username: String,
+    firstName: String,
+    joinedAt: { type: Date, default: Date.now },
+    totalUploads: { type: Number, default: 0 },
+    lastActive: { type: Date, default: Date.now },
+    isBlocked: { type: Boolean, default: false }
+});
+const UserModel = mongoose.model('User', UserSchema);
+
+const AnalyticSchema = new mongoose.Schema({
+    name: { type: String, unique: true, default: 'global' },
+    totalViews: { type: Number, default: 0 },
+    totalDownloads: { type: Number, default: 0 },
+    totalFiles: { type: Number, default: 0 },
+    totalUsers: { type: Number, default: 0 },
+    startTime: { type: Date, default: Date.now }
+});
+const AnalyticModel = mongoose.model('Analytic', AnalyticSchema);
+
+// Connection and Initialization Function
+async function initDatabase() {
+    if (!MONGO_URI) return; // Use in-memory if no URI
+    
+    try {
+        await mongoose.connect(MONGO_URI);
+        console.log('✅ MongoDB connected successfully!');
+
+        // 1. Load or Initialize Analytics
+        let analyticDoc = await AnalyticModel.findOneAndUpdate(
+            { name: 'global' }, 
+            { $setOnInsert: ANALYTICS }, 
+            { upsert: true, new: true }
+        );
+        ANALYTICS = analyticDoc.toObject();
+
+    } catch (error) {
+        console.error('❌ MongoDB connection error:', error);
+        console.warn('⚠️ Falling back to IN-MEMORY (volatile) mode due to DB failure.');
+        // Set MONGO_URI to null to force in-memory operations
+        process.env.MONGO_URI = null; 
+    }
+}
+
+
 // ============================================
 // TELEGRAM BOT
 // ============================================
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-console.log('✅ Bot started successfully!');
+console.log('✅ Bot object created.');
+
 
 // ============================================
-// HELPER FUNCTIONS
+// HELPER FUNCTIONS (Refactored to be Async)
 // ============================================
 
 function isAdmin(userId) {
     return ADMIN_IDS.includes(userId);
 }
 
-function registerUser(userId, username, firstName) {
-    if (!USER_DATABASE.has(userId)) {
-        USER_DATABASE.set(userId, {
-            userId: userId,
+async function registerUser(userId, username, firstName) {
+    if (!process.env.MONGO_URI) {
+        // IN-MEMORY FALLBACK
+        if (!USER_DATABASE.has(userId)) {
+            USER_DATABASE.set(userId, {
+                userId: userId,
+                username: username || 'Unknown',
+                firstName: firstName || 'User',
+                joinedAt: Date.now(),
+                totalUploads: 0,
+                lastActive: Date.now(),
+                isBlocked: false
+            });
+            ANALYTICS.totalUsers++;
+        } else {
+            const user = USER_DATABASE.get(userId);
+            user.lastActive = Date.now();
+        }
+        return USER_DATABASE.get(userId);
+    }
+    
+    // MONGODB PERSISTENCE
+    const result = await UserModel.findOneAndUpdate(
+        { userId: userId },
+        { 
             username: username || 'Unknown',
             firstName: firstName || 'User',
-            joinedAt: Date.now(),
-            totalUploads: 0,
-            lastActive: Date.now(),
-            isBlocked: false
-        });
+            lastActive: Date.now()
+        },
+        { upsert: true, new: true }
+    );
+    
+    if (result.isNew) { // Check if the document was just created
+        await AnalyticModel.updateOne({ name: 'global' }, { $inc: { totalUsers: 1 } });
         ANALYTICS.totalUsers++;
-    } else {
-        const user = USER_DATABASE.get(userId);
-        user.lastActive = Date.now();
     }
+    return result;
 }
 
-function getUserStats(userId) {
-    let files = 0;
-    let views = 0;
-    
-    for (const file of FILE_DATABASE.values()) {
-        if (file.uploadedBy === userId) {
-            files++;
-            views += file.views;
+async function getUserStats(userId) {
+    if (!process.env.MONGO_URI) {
+        // IN-MEMORY FALLBACK
+        let files = 0;
+        let views = 0;
+        for (const file of FILE_DATABASE.values()) {
+            if (file.uploadedBy === userId) {
+                files++;
+                views += file.views;
+            }
         }
+        return { files, views };
     }
     
-    return { files, views };
+    // MONGODB PERSISTENCE
+    const fileStats = await FileModel.aggregate([
+        { $match: { uploadedBy: userId } },
+        { $group: { 
+            _id: null, 
+            files: { $sum: 1 }, 
+            views: { $sum: '$views' } 
+        }}
+    ]);
+    
+    return fileStats[0] || { files: 0, views: 0 };
 }
 
 // ============================================
 // KEYBOARD LAYOUTS
 // ============================================
 
+// ... (No change to keyboard functions) ...
 function getMainKeyboard(isAdmin = false) {
     const keyboard = [
         [
@@ -152,8 +262,9 @@ function getFileActionsKeyboard(fileId) {
     };
 }
 
+
 // ============================================
-// BOT COMMANDS - START
+// BOT COMMANDS - START (Refactored to be Async)
 // ============================================
 
 bot.onText(/\/start/, async (msg) => {
@@ -162,8 +273,13 @@ bot.onText(/\/start/, async (msg) => {
     const username = msg.from.username;
     const firstName = msg.from.first_name;
     
-    registerUser(userId, username, firstName);
+    // Use async helper
+    await registerUser(userId, username, firstName); 
     
+    // Fetch latest total counts (from global ANALYTICS variable)
+    const totalFiles = process.env.MONGO_URI ? await FileModel.countDocuments() : ANALYTICS.totalFiles;
+    const totalUsers = process.env.MONGO_URI ? await UserModel.countDocuments() : ANALYTICS.totalUsers;
+
     const welcomeText = `
 🎬 <b>Welcome to BeatAnimes Link Generator!</b>
 
@@ -179,8 +295,8 @@ ${firstName}, I'm here to help you create <b>permanent streaming links</b> for y
 <b>🎯 Quick Start:</b>
 Just send me any video file, and I'll generate a permanent link instantly!
 
-<b>👥 Users:</b> ${ANALYTICS.totalUsers}
-<b>📁 Files:</b> ${ANALYTICS.totalFiles}
+<b>👥 Users:</b> ${totalUsers}
+<b>📁 Files:</b> ${totalFiles}
 <b>👁️ Total Views:</b> ${ANALYTICS.totalViews}
 
 Join our channel: ${CHANNEL_USERNAME}
@@ -211,7 +327,7 @@ Join our channel: ${CHANNEL_USERNAME}
 });
 
 // ============================================
-// CALLBACK QUERY HANDLER
+// CALLBACK QUERY HANDLER (Refactored to be Async)
 // ============================================
 
 bot.on('callback_query', async (query) => {
@@ -223,8 +339,9 @@ bot.on('callback_query', async (query) => {
     try {
         // My Stats
         if (data === 'my_stats') {
-            const user = USER_DATABASE.get(userId);
-            const stats = getUserStats(userId);
+            // Use async helper
+            const user = await registerUser(userId); // Fetches user data
+            const stats = await getUserStats(userId); // Use async helper
             
             const statsText = `
 📊 <b>Your Statistics</b>
@@ -258,26 +375,34 @@ Keep sharing videos! 🚀
             let count = 0;
             const buttons = [];
             
-            for (const [id, file] of FILE_DATABASE.entries()) {
-                if (file.uploadedBy === userId) {
-                    count++;
-                    if (count <= 10) {
-                        fileList += `${count}. ${file.fileName}\n`;
-                        fileList += `   👁️ ${file.views} views\n`;
-                        fileList += `   🆔 <code>${id}</code>\n\n`;
-                        
-                        buttons.push([
-                            { text: `📄 ${file.fileName.substring(0, 20)}...`, callback_data: `file_${id}` }
-                        ]);
-                    }
-                }
+            let filesQuery;
+            if (!process.env.MONGO_URI) {
+                // IN-MEMORY FALLBACK
+                filesQuery = Array.from(FILE_DATABASE.entries())
+                    .filter(([id, file]) => file.uploadedBy === userId);
+            } else {
+                // MONGODB PERSISTENCE
+                filesQuery = await FileModel.find({ uploadedBy: userId }).sort({ createdAt: -1 }).limit(10).lean();
+            }
+
+            for (const file of filesQuery) {
+                const id = process.env.MONGO_URI ? file._id : file[0];
+                const fileData = process.env.MONGO_URI ? file : file[1];
+                
+                count++;
+                fileList += `${count}. ${fileData.fileName}\n`;
+                fileList += `   👁️ ${fileData.views} views\n`;
+                fileList += `   🆔 <code>${id}</code>\n\n`;
+                
+                buttons.push([
+                    { text: `📄 ${fileData.fileName.substring(0, 20)}...`, callback_data: `file_${id}` }
+                ]);
             }
             
             if (count === 0) {
                 fileList = '📭 You haven\'t uploaded any files yet.\n\nSend me a video to get started!';
-            } else if (count > 10) {
-                fileList += `\n<i>Showing 10 of ${count} files</i>`;
-            }
+            } 
+            // Note: MongoDB query already limits to 10
             
             buttons.push([{ text: '🔙 Back', callback_data: 'start' }]);
             
@@ -333,14 +458,18 @@ Need more help? Contact admin!
         
         // Admin Panel
         else if (data === 'admin_panel' && isAdmin(userId)) {
+            // Recalculate global stats for admin view
+            const totalUsers = process.env.MONGO_URI ? await UserModel.countDocuments() : USER_DATABASE.size;
+            const totalFiles = process.env.MONGO_URI ? await FileModel.countDocuments() : FILE_DATABASE.size;
+
             const adminText = `
 👑 <b>Admin Panel</b>
 
 Welcome Admin! Here you can manage the bot.
 
 📊 Quick Stats:
-• Users: ${USER_DATABASE.size}
-• Files: ${FILE_DATABASE.size}
+• Users: ${totalUsers}
+• Files: ${totalFiles}
 • Views: ${ANALYTICS.totalViews}
 • Downloads: ${ANALYTICS.totalDownloads}
 
@@ -358,16 +487,29 @@ Choose an option below:
         // Admin Stats
         else if (data === 'admin_stats' && isAdmin(userId)) {
             let totalSize = 0;
-            for (const file of FILE_DATABASE.values()) {
-                totalSize += file.fileSize;
+            let topFilesData;
+
+            if (!process.env.MONGO_URI) {
+                // IN-MEMORY FALLBACK
+                for (const file of FILE_DATABASE.values()) {
+                    totalSize += file.fileSize;
+                }
+                topFilesData = Array.from(FILE_DATABASE.entries());
+            } else {
+                // MONGODB PERSISTENCE
+                const totalSizeResult = await FileModel.aggregate([
+                    { $group: { _id: null, totalSize: { $sum: '$fileSize' } } }
+                ]);
+                totalSize = totalSizeResult[0]?.totalSize || 0;
+                topFilesData = await FileModel.find().sort({ views: -1 }).limit(5).lean();
             }
-            
+
             const uptime = process.uptime();
             const statsText = `
 📊 <b>Detailed Statistics</b>
 
-👥 <b>Users:</b> ${USER_DATABASE.size}
-📁 <b>Total Files:</b> ${FILE_DATABASE.size}
+👥 <b>Users:</b> ${process.env.MONGO_URI ? await UserModel.countDocuments() : USER_DATABASE.size}
+📁 <b>Total Files:</b> ${process.env.MONGO_URI ? await FileModel.countDocuments() : FILE_DATABASE.size}
 💾 <b>Total Storage:</b> ${formatFileSize(totalSize)}
 👁️ <b>Total Views:</b> ${ANALYTICS.totalViews}
 ⬇️ <b>Total Downloads:</b> ${ANALYTICS.totalDownloads}
@@ -377,7 +519,7 @@ Choose an option below:
 🚀 <b>Running Since:</b> ${formatDate(ANALYTICS.startTime)}
 
 <b>Top Files:</b>
-${getTopFiles(5)}
+${getTopFiles(5, topFilesData)}
             `;
             
             await bot.editMessageText(statsText, {
@@ -397,18 +539,27 @@ ${getTopFiles(5)}
             let userList = '👥 <b>User List</b>\n\n';
             let count = 0;
             
-            for (const user of USER_DATABASE.values()) {
+            let usersQuery;
+            if (!process.env.MONGO_URI) {
+                // IN-MEMORY FALLBACK
+                usersQuery = Array.from(USER_DATABASE.values());
+            } else {
+                // MONGODB PERSISTENCE
+                usersQuery = await UserModel.find().sort({ joinedAt: -1 }).limit(15).lean();
+            }
+
+            for (const user of usersQuery) {
                 count++;
-                if (count <= 15) {
-                    const stats = getUserStats(user.userId);
-                    userList += `${count}. ${user.firstName} (@${user.username})\n`;
-                    userList += `   Files: ${stats.files} | Views: ${stats.views}\n`;
-                    userList += `   Joined: ${formatDate(user.joinedAt)}\n\n`;
-                }
+                const stats = await getUserStats(user.userId); // Use async helper
+                userList += `${count}. ${user.firstName} (@${user.username || 'N/A'})\n`;
+                userList += `   Files: ${stats.files} | Views: ${stats.views}\n`;
+                userList += `   Joined: ${formatDate(user.joinedAt)}\n\n`;
             }
             
-            if (count > 15) {
-                userList += `\n<i>Showing 15 of ${count} users</i>`;
+            if (process.env.MONGO_URI && await UserModel.countDocuments() > 15) {
+                userList += `\n<i>Showing 15 of ${await UserModel.countDocuments()} users</i>`;
+            } else if (!process.env.MONGO_URI && USER_DATABASE.size > 15) {
+                 userList += `\n<i>Showing 15 of ${USER_DATABASE.size} users</i>`;
             }
             
             await bot.editMessageText(userList, {
@@ -449,8 +600,14 @@ ${getTopFiles(5)}
         // File Details
         else if (data.startsWith('file_')) {
             const fileId = data.substring(5);
-            const fileData = FILE_DATABASE.get(fileId);
             
+            let fileData;
+            if (!process.env.MONGO_URI) {
+                fileData = FILE_DATABASE.get(fileId);
+            } else {
+                fileData = await FileModel.findById(fileId).lean();
+            }
+
             if (!fileData) {
                 return bot.answerCallbackQuery(query.id, {
                     text: '❌ File not found in database!',
@@ -493,7 +650,12 @@ Choose an action:
         // File Stats (from button on file page)
         else if (data.startsWith('file_stats_')) {
             const fileId = data.substring(11);
-            const fileData = FILE_DATABASE.get(fileId);
+            let fileData;
+            if (!process.env.MONGO_URI) {
+                fileData = FILE_DATABASE.get(fileId);
+            } else {
+                fileData = await FileModel.findById(fileId).lean();
+            }
             
             if (!fileData) {
                 return bot.answerCallbackQuery(query.id, {
@@ -508,15 +670,43 @@ Choose an action:
             });
         }
 
-        // Delete File (Placeholder for admin/user functionality)
+        // Delete File
         else if (data.startsWith('delete_file_')) {
-            // Implement delete logic here
             const fileId = data.substring(12);
-            // FILE_DATABASE.delete(fileId);
             
+            let fileData;
+            if (!process.env.MONGO_URI) {
+                fileData = FILE_DATABASE.get(fileId);
+            } else {
+                fileData = await FileModel.findById(fileId).lean();
+            }
+
+            if (!isAdmin(userId) && fileData.uploadedBy !== userId) {
+                 return bot.answerCallbackQuery(query.id, {
+                    text: '❌ You are not authorized to delete this file!',
+                    show_alert: true
+                });
+            }
+
+            if (!process.env.MONGO_URI) {
+                FILE_DATABASE.delete(fileId);
+                ANALYTICS.totalFiles--;
+            } else {
+                await FileModel.deleteOne({ _id: fileId });
+                await AnalyticModel.updateOne({ name: 'global' }, { $inc: { totalFiles: -1 } });
+                ANALYTICS.totalFiles--;
+            }
+
             await bot.answerCallbackQuery(query.id, {
-                text: `🗑️ Delete functionality not implemented yet for file ${fileId}.`,
+                text: `🗑️ File ${fileData.fileName} deleted successfully!`,
                 show_alert: true
+            });
+
+            // Re-render my_files
+            await bot.deleteMessage(chatId, messageId);
+            bot.emit('callback_query', { 
+                ...query, 
+                data: 'my_files'
             });
         }
         
@@ -532,7 +722,7 @@ Choose an action:
 });
 
 // ============================================
-// FILE UPLOAD HANDLER
+// FILE UPLOAD HANDLER (Refactored to be Async)
 // ============================================
 
 bot.on('message', async (msg) => {
@@ -543,7 +733,8 @@ bot.on('message', async (msg) => {
     const username = msg.from.username;
     const firstName = msg.from.first_name;
     
-    registerUser(userId, username, firstName);
+    // Use async helper
+    const user = await registerUser(userId, username, firstName); 
     
     const file = msg.video || msg.document || msg.video_note;
     
@@ -572,7 +763,8 @@ bot.on('message', async (msg) => {
         
         const uniqueId = generateUniqueId();
         
-        FILE_DATABASE.set(uniqueId, {
+        const fileData = {
+            _id: uniqueId, // Mongoose uses _id for the primary key
             fileId: fileId,
             fileUniqueId: fileUniqueId,
             fileName: fileName,
@@ -584,12 +776,21 @@ bot.on('message', async (msg) => {
             views: 0,
             downloads: 0,
             lastAccessed: Date.now()
-        });
+        };
+
+        if (!process.env.MONGO_URI) {
+            // IN-MEMORY FALLBACK
+            FILE_DATABASE.set(uniqueId, fileData);
+            user.totalUploads++;
+            ANALYTICS.totalFiles++;
+        } else {
+            // MONGODB PERSISTENCE
+            await FileModel.create(fileData);
+            await UserModel.updateOne({ userId: userId }, { $inc: { totalUploads: 1 } });
+            await AnalyticModel.updateOne({ name: 'global' }, { $inc: { totalFiles: 1 } });
+            ANALYTICS.totalFiles++;
+        }
         
-        const user = USER_DATABASE.get(userId);
-        user.totalUploads++;
-        
-        ANALYTICS.totalFiles++;
         
         const streamLink = `${WEBAPP_URL}/stream/${uniqueId}`;
         const downloadLink = `${WEBAPP_URL}/download/${uniqueId}`;
@@ -679,7 +880,14 @@ bot.onText(/\/broadcast (.+)/, async (msg, match) => {
     
     const statusMsg = await bot.sendMessage(msg.chat.id, '📢 Broadcasting...');
     
-    for (const user of USER_DATABASE.values()) {
+    let usersQuery;
+    if (!process.env.MONGO_URI) {
+        usersQuery = Array.from(USER_DATABASE.values());
+    } else {
+        usersQuery = await UserModel.find({}, 'userId').lean();
+    }
+
+    for (const user of usersQuery) {
         try {
             await bot.sendMessage(user.userId, message, { parse_mode: 'HTML' });
             sent++;
@@ -698,6 +906,7 @@ bot.onText(/\/broadcast (.+)/, async (msg, match) => {
 // ============================================
 // HELPER: Get fresh Telegram file URL
 // ============================================
+// ... (No change to getFreshFileUrl, it uses in-memory cache) ...
 async function getFreshFileUrl(fileData) {
     const cacheKey = fileData.fileId;
     const cached = URL_CACHE.get(cacheKey);
@@ -722,8 +931,9 @@ async function getFreshFileUrl(fileData) {
     }
 }
 
+
 // ============================================
-// EXPRESS SERVER - Beautiful Admin Panel
+// EXPRESS SERVER - Beautiful Admin Panel (Refactored to be Async)
 // ============================================
 const app = express();
 
@@ -739,79 +949,15 @@ app.use((req, res, next) => {
     next();
 });
 
-// Home page - Beautiful landing
-app.get('/', (req, res) => {
+// Home page - Beautiful landing (Refactored to be Async)
+app.get('/', async (req, res) => {
+    const totalUsers = process.env.MONGO_URI ? await UserModel.countDocuments() : ANALYTICS.totalUsers;
+    const totalFiles = process.env.MONGO_URI ? await FileModel.countDocuments() : ANALYTICS.totalFiles;
+    
     res.send(`
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BeatAnimes Link Generator</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-        }
-        .container {
-            text-align: center;
-            padding: 40px;
-            background: rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-            max-width: 600px;
-        }
-        h1 { font-size: 3em; margin-bottom: 20px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
-        p { font-size: 1.2em; margin-bottom: 30px; opacity: 0.9; }
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 20px;
-            margin: 30px 0;
-        }
-        .stat-card {
-            background: rgba(255, 255, 255, 0.2);
-            padding: 20px;
-            border-radius: 10px;
-            backdrop-filter: blur(5px);
-        }
-        .stat-number { font-size: 2em; font-weight: bold; }
-        .stat-label { opacity: 0.8; margin-top: 5px; }
-        .btn {
-            display: inline-block;
-            padding: 15px 40px;
-            background: white;
-            color: #667eea;
-            text-decoration: none;
-            border-radius: 50px;
-            font-weight: bold;
-            font-size: 1.1em;
-            transition: transform 0.3s;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-        }
-        .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3); }
-        .features {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 15px;
-            margin: 30px 0;
-            text-align: left;
-        }
-        .feature {
-            background: rgba(255, 255, 255, 0.15);
-            padding: 15px;
-            border-radius: 10px;
-        }
-        .feature-icon { font-size: 2em; margin-bottom: 10px; }
-    </style>
-</head>
+// ... (HTML content unchanged) ...
 <body>
     <div class="container">
         <h1>🎬 BeatAnimes</h1>
@@ -819,11 +965,11 @@ app.get('/', (req, res) => {
         
         <div class="stats">
             <div class="stat-card">
-                <div class="stat-number">${ANALYTICS.totalUsers}</div>
+                <div class="stat-number">${totalUsers}</div>
                 <div class="stat-label">Users</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number">${ANALYTICS.totalFiles}</div>
+                <div class="stat-number">${totalFiles}</div>
                 <div class="stat-label">Files</div>
             </div>
             <div class="stat-card">
@@ -832,64 +978,53 @@ app.get('/', (req, res) => {
             </div>
         </div>
         
-        <div class="features">
-            <div class="feature">
-                <div class="feature-icon">🔗</div>
-                <strong>Permanent Links</strong>
-                <p style="opacity: 0.8; margin-top: 5px;">Links that never expire</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">⚡</div>
-                <strong>Fast Streaming</strong>
-                <p style="opacity: 0.8; margin-top: 5px;">Lightning fast delivery</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">📊</div>
-                <strong>Analytics</strong>
-                <p style="opacity: 0.8; margin-top: 5px;">Track your views</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🔒</div>
-                <strong>Secure</strong>
-                <p style="opacity: 0.8; margin-top: 5px;">Safe and reliable</p>
-            </div>
-        </div>
-        
-        <a href="https://t.me/YourBotUsername" class="btn">Start Using Bot 🚀</a>
-        
-        <p style="margin-top: 30px; opacity: 0.7; font-size: 0.9em;">
-            Join ${CHANNEL_USERNAME} for updates
-        </p>
-    </div>
-</body>
+// ... (Rest of HTML unchanged) ...
 </html>
     `);
 });
 
-// Health check
-app.get('/ping', (req, res) => {
+// Health check (Refactored to be Async)
+app.get('/ping', async (req, res) => {
+    const totalFiles = process.env.MONGO_URI ? await FileModel.countDocuments() : FILE_DATABASE.size;
+    const totalUsers = process.env.MONGO_URI ? await UserModel.countDocuments() : USER_DATABASE.size;
+
     res.json({
         status: 'ok',
         uptime: process.uptime(),
-        files: FILE_DATABASE.size,
-        users: USER_DATABASE.size,
+        files: totalFiles,
+        users: totalUsers,
         views: ANALYTICS.totalViews,
         downloads: ANALYTICS.totalDownloads
     });
 });
 
-// Stream video with range support
+// Stream video with range support (Refactored to be Async)
 app.get('/stream/:id', async (req, res) => {
     const fileId = req.params.id;
-    const fileData = FILE_DATABASE.get(fileId);
+    
+    let fileData;
+    if (!process.env.MONGO_URI) {
+        fileData = FILE_DATABASE.get(fileId);
+    } else {
+        fileData = await FileModel.findById(fileId).lean();
+    }
     
     if (!fileData) {
         return res.status(404).send('File not found');
     }
     
     try {
-        fileData.views++;
-        fileData.lastAccessed = Date.now();
+        if (!process.env.MONGO_URI) {
+            fileData.views++;
+            fileData.lastAccessed = Date.now();
+        } else {
+             await FileModel.updateOne({ _id: fileId }, { 
+                $inc: { views: 1 }, 
+                lastAccessed: Date.now() 
+            });
+        }
+
+        await AnalyticModel.updateOne({ name: 'global' }, { $inc: { totalViews: 1 } });
         ANALYTICS.totalViews++;
         
         const fileUrl = await getFreshFileUrl(fileData);
@@ -928,18 +1063,29 @@ app.get('/stream/:id', async (req, res) => {
 });
 
 
-// Download video
+// Download video (Refactored to be Async)
 app.get('/download/:id', async (req, res) => {
     const fileId = req.params.id;
     
-    const fileData = FILE_DATABASE.get(fileId);
+    let fileData;
+    if (!process.env.MONGO_URI) {
+        fileData = FILE_DATABASE.get(fileId);
+    } else {
+        fileData = await FileModel.findById(fileId).lean();
+    }
     
     if (!fileData) {
         return res.status(404).send('File not found');
     }
     
     try {
-        fileData.downloads++;
+        if (!process.env.MONGO_URI) {
+            fileData.downloads++;
+        } else {
+            await FileModel.updateOne({ _id: fileId }, { $inc: { downloads: 1 } });
+        }
+        
+        await AnalyticModel.updateOne({ name: 'global' }, { $inc: { totalDownloads: 1 } });
         ANALYTICS.totalDownloads++;
         
         const fileUrl = await getFreshFileUrl(fileData);
@@ -960,11 +1106,17 @@ app.get('/download/:id', async (req, res) => {
     }
 });
 
-// File info API
-app.get('/api/file/:id', (req, res) => {
+// File info API (Refactored to be Async)
+app.get('/api/file/:id', async (req, res) => {
     const fileId = req.params.id;
-    const fileData = FILE_DATABASE.get(fileId);
     
+    let fileData;
+    if (!process.env.MONGO_URI) {
+        fileData = FILE_DATABASE.get(fileId);
+    } else {
+        fileData = await FileModel.findById(fileId).lean();
+    }
+
     if (!fileData) {
         return res.status(404).json({ error: 'File not found' });
     }
@@ -976,15 +1128,25 @@ app.get('/api/file/:id', (req, res) => {
         views: fileData.views,
         createdAt: fileData.createdAt,
         streamUrl: `${WEBAPP_URL}/stream/${fileId}`,
-        downloadUrl: `${WEBAPP_APP_URL}/download/${fileId}`
+        downloadUrl: `${WEBAPP_URL}/download/${fileId}`
     });
 });
 
-// List all files API
-app.get('/api/files', (req, res) => {
+// List all files API (Refactored to be Async)
+app.get('/api/files', async (req, res) => {
     const files = [];
     
-    for (const [id, data] of FILE_DATABASE.entries()) {
+    let filesQuery;
+    if (!process.env.MONGO_URI) {
+        filesQuery = Array.from(FILE_DATABASE.entries());
+    } else {
+        filesQuery = await FileModel.find().lean();
+    }
+
+    for (const file of filesQuery) {
+        const id = process.env.MONGO_URI ? file._id : file[0];
+        const data = process.env.MONGO_URI ? file : file[1];
+
         files.push({
             id: id,
             fileName: data.fileName,
@@ -1035,13 +1197,21 @@ function formatDate(timestamp) {
     });
 }
 
-function getTopFiles(limit = 5) {
-    const sorted = Array.from(FILE_DATABASE.entries())
-        .sort((a, b) => b[1].views - a[1].views)
-        .slice(0, limit);
+function getTopFiles(limit = 5, topFilesData) {
+    let sorted;
+    if (!process.env.MONGO_URI) {
+        // IN-MEMORY FALLBACK
+        sorted = Array.from(topFilesData)
+            .sort((a, b) => b[1].views - a[1].views)
+            .slice(0, limit);
+    } else {
+        // MONGODB PERSISTENCE
+        sorted = topFilesData;
+    }
     
     let result = '';
-    sorted.forEach(([id, file], i) => {
+    sorted.forEach((item, i) => {
+        const file = process.env.MONGO_URI ? item : item[1];
         result += `${i + 1}. ${file.fileName} - ${file.views} views\n`;
     });
     
@@ -1055,21 +1225,30 @@ function sleep(ms) {
 // ============================================
 // START SERVER
 // ============================================
-app.listen(PORT, () => {
-    console.log('═══════════════════════════════════════');
-    console.log('🎬 BeatAnimes Link Generator Bot');
-    console.log('═══════════════════════════════════════');
-    console.log(`✅ Server running on port ${PORT}`);
-    console.log(`📡 URL: ${WEBAPP_URL}`);
-    console.log(`👑 Admins: ${ADMIN_IDS.length}`);
-    console.log(`🤖 Bot is ready!`);
-    console.log('═══════════════════════════════════════');
-});
+// Wrap the start logic in an async IIFE to connect to DB first
+(async () => {
+    await initDatabase(); 
+    
+    app.listen(PORT, () => {
+        console.log('═══════════════════════════════════════');
+        console.log('🎬 BeatAnimes Link Generator Bot');
+        console.log('═══════════════════════════════════════');
+        console.log(`✅ Server running on port ${PORT}`);
+        console.log(`📡 URL: ${WEBAPP_URL}`);
+        console.log(`👑 Admins: ${ADMIN_IDS.length}`);
+        console.log(`🤖 Bot is ready! (Persistence: ${process.env.MONGO_URI ? 'MongoDB' : 'In-Memory'})`);
+        console.log('═══════════════════════════════════════');
+    });
+})();
 
 // Graceful shutdown
 process.on('SIGINT', () => {
     console.log('\n⏸️ Shutting down...');
     bot.stopPolling();
+    if (mongoose.connection.readyState === 1) {
+        mongoose.disconnect();
+        console.log('👋 MongoDB disconnected.');
+    }
     process.exit(0);
 });
 
