@@ -1,6 +1,8 @@
 // ============================================
 // ULTIMATE TELEGRAM PERMANENT LINK BOT
-// New Features: Universal Broadcast (Interval/Media), Expiration Countdown, Admin Health Tools
+// Features: Tiers, Limits, Expiration, Referral, Universal Broadcast, 
+//           Universal Auto-Accept Join Requests, Channel Tracking, 
+//           Custom Aliases, Full Streaming Logic (Range Support).
 // ============================================
 
 import TelegramBot from 'node-telegram-bot-api';
@@ -17,13 +19,12 @@ const PORT = process.env.PORT || 3000;
 // Admin Configuration
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id)) : [];
 const WELCOME_PHOTO_ID = process.env.WELCOME_PHOTO_ID || null; 
-const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME || '@YourChannel'; 
-const BOT_USERNAME = process.env.BOT_USERNAME || 'YourBotUsername'; 
+const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME || '@YourChannel'; // Main channel for Force Join
 
-// Mandatory Channel ID for Force Join Gate
-const CHANNEL_ID = process.env.CHANNEL_ID || -1001234567890; 
+// ID of the mandatory channel for initial access (Bot must be an admin here)
+const MANDATORY_CHANNEL_ID = process.env.MANDATORY_CHANNEL_ID || -1001234567890; 
 
-// Link Limits Configuration
+// Link Limits Configuration (Monetization)
 const LINK_LIMITS = {
     NORMAL: 10,  
     PREMIUM: 50, 
@@ -33,24 +34,25 @@ const LINK_LIMITS = {
 // File expiration time for NORMAL users (30 days)
 const NORMAL_USER_EXPIRY = 30 * 24 * 60 * 60 * 1000; 
 
-// NEW: Broadcast Interval (Crucial for Render Free Tier)
-const BROADCAST_INTERVAL_MS = 3000; // Send 1 message every 3 seconds
+// Broadcast Configuration
+const BROADCAST_INTERVAL_MS = 3000; // 3 seconds per message delay for safe broadcasting
 
 if (!BOT_TOKEN) {
-    console.error('❌ BOT_TOKEN is required!');
+    console.error('❌ BOT_TOKEN is required! Please set the BOT_TOKEN environment variable.');
     process.exit(1);
 }
 
 // ============================================
-// DATABASE & STATE
+// DATABASE & STATE (In-memory storage)
 // ============================================
-const FILE_DATABASE = new Map();
-const USER_DATABASE = new Map();
-const URL_CACHE = new Map();
-const URL_CACHE_DURATION = 23 * 60 * 60 * 1000;
-const USER_STATE = new Map(); 
+const FILE_DATABASE = new Map(); 
+const USER_DATABASE = new Map(); 
+const CHAT_DATABASE = new Map(); // Stores all non-private chats the bot is in (FOR ADMIN STATS)
+const URL_CACHE = new Map(); 
+const URL_CACHE_DURATION = 23 * 60 * 60 * 1000; 
+const USER_STATE = new Map(); // Tracks multi-step user actions (e.g., renaming, broadcasting)
 
-// NEW: Broadcast queue and status
+// Broadcast queue and status
 const BROADCAST_STATUS = {
     isSending: false,
     queue: [],
@@ -79,39 +81,34 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 console.log('✅ Bot started successfully!');
 
 // ============================================
-// HELPER FUNCTIONS
+// UTILITY FUNCTIONS & CORE LOGIC
 // ============================================
 
 function isAdmin(userId) {
     return ADMIN_IDS.includes(userId);
 }
 
-// ... (checkMembership, registerUser, getUserStats, canGenerateLink remain the same) ...
-
-/**
- * Checks if a file is permanent or expired based on user type and age.
- * @param {string} fileId 
- * @returns {boolean}
- */
-function isFilePermanent(fileId) {
-    const file = FILE_DATABASE.get(fileId);
-    if (!file) return false;
-
-    const uploader = USER_DATABASE.get(file.uploadedBy);
-    const uploaderType = uploader ? uploader.userType : 'NORMAL';
-
-    if (uploaderType === 'PREMIUM' || uploaderType === 'ADMIN') {
-        return true; 
-    }
-
-    return (Date.now() - file.createdAt) < NORMAL_USER_EXPIRY;
+function generateUniqueId() {
+    return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 }
 
-/**
- * Formats the remaining time until expiration.
- * @param {number} timestamp 
- * @returns {string}
- */
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+}
+
+function formatUptime(seconds) {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    if (days > 0) return `${days}d ${hours}h`;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+}
+
 function formatRemainingTime(timestamp) {
     const remainingMs = NORMAL_USER_EXPIRY - (Date.now() - timestamp);
     if (remainingMs <= 0) return 'Expired';
@@ -123,625 +120,86 @@ function formatRemainingTime(timestamp) {
     return `${hours}h`;
 }
 
-
-// ============================================
-// KEYBOARD LAYOUTS
-// ============================================
-
-// ... (getForceJoinKeyboard, getMainKeyboard, getUserRowButtons remain the same) ...
-
-function getAdminKeyboard() {
-    // NEW: Added admin_trigger_cleanup
-    const isBroadcasting = BROADCAST_STATUS.isSending;
-    const broadcastText = isBroadcasting ? `⏳ Broadcast in Progress (${BROADCAST_STATUS.sentCount}/${BROADCAST_STATUS.queue.length})` : '📢 Universal Broadcast';
-
-    return {
-        inline_keyboard: [
-            [
-                { text: '📊 Statistics', callback_data: 'admin_stats' },
-                { text: '👥 Manage Users', callback_data: 'admin_users_1' } 
-            ],
-            [
-                { text: broadcastText, callback_data: isBroadcasting ? 'admin_stop_broadcast' : 'admin_broadcast_start' }, 
-                { text: '🧹 Cleanup Links/Cache', callback_data: 'admin_trigger_cleanup' } // NEW
-            ],
-            [
-                { text: '🔙 Back', callback_data: 'start' }
-            ]
-        ]
-    };
-}
-
-// MODIFIED: Added file expiry status/countdown
-function getFileActionsKeyboard(fileId, userType) {
-    const file = FILE_DATABASE.get(fileId);
-    
-    if (!file) return { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'my_files' }]] };
-
-    const streamLink = `${WEBAPP_URL}/stream/${file.customAlias || fileId}`;
-    const downloadLink = `${WEBAPP_URL}/download/${file.customAlias || fileId}`;
-    const isPermanent = isFilePermanent(fileId);
-    
-    let statusRow = [];
-    if (isPermanent) {
-        statusRow.push({ text: '✨ Permanent Link', callback_data: 'ignore' });
+function registerUser(userId, username, firstName, referrerId = null) {
+    if (!USER_DATABASE.has(userId)) {
+        USER_DATABASE.set(userId, {
+            userId: userId,
+            username: username || 'Unknown',
+            firstName: firstName || 'User',
+            joinedAt: Date.now(),
+            totalUploads: 0, 
+            lastActive: Date.now(),
+            isBlocked: false, 
+            userType: 'NORMAL',
+            referrerId: referrerId,
+            referralBonus: 0
+        });
+        ANALYTICS.totalUsers++;
     } else {
-        const remainingTime = formatRemainingTime(file.createdAt);
-        statusRow.push({ text: `⚠️ Expires in ${remainingTime}`, callback_data: 'premium_info' });
+        const user = USER_DATABASE.get(userId);
+        user.lastActive = Date.now();
+        if (!user.referrerId && referrerId) {
+             user.referrerId = referrerId;
+        }
     }
-
-    const aliasButton = [];
-    if (userType === 'PREMIUM' || userType === 'ADMIN') {
-        const alias = file.customAlias ? `🏷️ ${file.customAlias}` : '🏷️ Set Custom Alias';
-        aliasButton.push({ text: alias, callback_data: `alias_file_${fileId}` });
-    }
-
-    return {
-        inline_keyboard: [
-            statusRow, 
-            [
-                { text: '🔗 Open Stream', url: streamLink },
-                { text: '⬇️ Download', url: downloadLink }
-            ],
-            [
-                { text: '📊 Stats', callback_data: `file_stats_${fileId}` },
-                { text: '🗑️ Delete', callback_data: `delete_file_${fileId}` }
-            ],
-            [
-                { text: '📝 Rename', callback_data: `rename_file_${fileId}` }, 
-                ...aliasButton 
-            ],
-            [
-                { text: '🔙 Back', callback_data: 'my_files' }
-            ]
-        ]
-    };
+    return USER_DATABASE.get(userId);
 }
 
-// ============================================
-// BROADCAST JOB FUNCTION
-// ============================================
-
-/**
- * Manages the interval-based, batched sending of broadcast messages.
- */
-function startBroadcastJob(chatId, messageId) {
-    if (BROADCAST_STATUS.isSending) return;
-
-    BROADCAST_STATUS.isSending = true;
-    BROADCAST_STATUS.sourceChatId = chatId;
-    BROADCAST_STATUS.sourceMessageId = messageId;
-    BROADCAST_STATUS.queue = Array.from(USER_DATABASE.keys()).filter(id => !isAdmin(id)); // Target all non-admins
-    BROADCAST_STATUS.sentCount = 0;
-    BROADCAST_STATUS.failedCount = 0;
-
-    const totalUsers = BROADCAST_STATUS.queue.length;
-    
-    const intervalHandler = setInterval(async () => {
-        if (BROADCAST_STATUS.queue.length === 0) {
-            clearInterval(BROADCAST_STATUS.jobInterval);
-            BROADCAST_STATUS.isSending = false;
-            
-            // Send final report
-            bot.sendMessage(chatId, `✅ **Broadcast Complete!**\n\nTotal Users: ${totalUsers}\nSent: ${BROADCAST_STATUS.sentCount}\nFailed: ${BROADCAST_STATUS.failedCount}`, { parse_mode: 'Markdown' });
-            return;
-        }
-
-        const targetId = BROADCAST_STATUS.queue.shift();
-        
-        try {
-            await bot.copyMessage(
-                targetId,
-                BROADCAST_STATUS.sourceChatId,
-                BROADCAST_STATUS.sourceMessageId,
-                { reply_markup: BROADCAST_STATUS.keyboard }
-            );
-            BROADCAST_STATUS.sentCount++;
-        } catch (error) {
-            BROADCAST_STATUS.failedCount++;
-            // Log error, but don't stop the job
-        }
-
-        // Optional: Send periodic update to admin
-        if (BROADCAST_STATUS.sentCount % 10 === 0 && BROADCAST_STATUS.sentCount > 0) {
-            bot.sendMessage(chatId, `⏳ Broadcast Status: ${BROADCAST_STATUS.sentCount} of ${totalUsers} sent.`, { parse_mode: 'Markdown' }).catch(() => {});
-        }
-
-    }, BROADCAST_INTERVAL_MS);
-
-    BROADCAST_STATUS.jobInterval = intervalHandler;
+function getUserType(userId) {
+    if (isAdmin(userId)) return 'ADMIN';
+    const user = USER_DATABASE.get(userId);
+    return user ? user.userType : 'NORMAL'; 
 }
 
-// ============================================
-// MAINTENANCE JOB FUNCTION
-// ============================================
+function canGenerateLink(userId) {
+    const user = USER_DATABASE.get(userId) || { totalUploads: 0, referralBonus: 0 };
+    const userType = getUserType(userId);
+    if (userType === 'ADMIN') return { allowed: true, limit: LINK_LIMITS.ADMIN, current: user.totalUploads, userType: 'ADMIN' };
 
-/**
- * Executes the cleanup of expired files and URL cache.
- */
-function runMaintenanceJob() {
-    const now = Date.now();
-    let cleanedFiles = 0;
-    let cleanedCache = 0;
+    const baseLimit = LINK_LIMITS[userType] || LINK_LIMITS.NORMAL;
+    const totalLimit = baseLimit + (user.referralBonus || 0);
+    const isAllowed = user.totalUploads < totalLimit;
 
-    // 1. File Expiration Cleanup
-    for (const [id, file] of FILE_DATABASE.entries()) {
-        const uploader = USER_DATABASE.get(file.uploadedBy);
-        const uploaderType = uploader ? uploader.userType : 'NORMAL';
-
-        if (uploaderType === 'NORMAL' && (now - file.createdAt) > NORMAL_USER_EXPIRY) {
-            
-            FILE_DATABASE.delete(id);
-            ANALYTICS.totalFiles--;
-            if (uploader) {
-                uploader.totalUploads = Math.max(0, uploader.totalUploads - 1);
-            }
-
-            cleanedFiles++;
-
-            bot.sendMessage(file.uploadedBy, `🗑️ **Your file has expired!**\n\nThe link for **${file.fileName}** has been removed after 30 days. Your link slot has been reclaimed.\n\nUpgrade to **PREMIUM** to get permanent links!`, {
-                parse_mode: 'Markdown'
-            }).catch(() => {});
-        }
-    }
-
-    // 2. URL Cache Cleanup
-    for (const [key, value] of URL_CACHE.entries()) {
-        if (now - value.timestamp > URL_CACHE_DURATION) {
-            URL_CACHE.delete(key);
-            cleanedCache++;
-        }
-    }
-    
-    return { cleanedFiles, cleanedCache };
+    return { allowed: isAllowed, limit: totalLimit, current: user.totalUploads, userType: userType };
 }
 
+function isFilePermanent(fileId) {
+    const file = FILE_DATABASE.get(fileId);
+    if (!file) return false;
 
-// ============================================
-// CALLBACK QUERY HANDLER (MODIFIED)
-// ============================================
+    const uploader = USER_DATABASE.get(file.uploadedBy);
+    const uploaderType = uploader ? uploader.userType : 'NORMAL';
 
-bot.on('callback_query', async (query) => {
-    const chatId = query.message.chat.id;
-    const userId = query.from.id;
-    const data = query.data;
-    const messageId = query.message.message_id;
-    
-    const user = USER_DATABASE.get(userId) || registerUser(userId, query.from.username, query.from.first_name);
-    
-    // ... (Block and Force Join Checks) ...
-
-    if (user.isBlocked) { 
-        return bot.answerCallbackQuery(query.id, { text: '❌ You are blocked from using the bot.', show_alert: true }); 
+    if (uploaderType === 'PREMIUM' || uploaderType === 'ADMIN') {
+        return true; 
     }
-    if (data === 'check_join') {
-        const isMember = await checkMembership(userId);
-        if (isMember) {
-            bot.emit('message', { ...query.message, text: '/start', from: query.from, chat: { id: chatId } });
-            return bot.answerCallbackQuery(query.id, { text: '✅ Access Granted! Welcome!', show_alert: true });
-        } else {
-            return bot.answerCallbackQuery(query.id, { text: '⚠️ Still not a member. Please join and try again.', show_alert: true });
-        }
-    }
-    const isMember = await checkMembership(userId);
-    if (!isMember && !isAdmin(userId)) {
-        await bot.answerCallbackQuery(query.id, { text: '⚠️ You must join the channel to continue.', show_alert: true });
-        return;
-    }
+    return (Date.now() - file.createdAt) < NORMAL_USER_EXPIRY;
+}
 
-    // --- NEW: Initiate Universal Broadcast (Step 1) ---
-    else if (data === 'admin_broadcast_start' && isAdmin(userId)) {
-        if (BROADCAST_STATUS.isSending) {
-             return bot.answerCallbackQuery(query.id, { text: '⏳ A broadcast is currently running. Stop it first.', show_alert: true });
-        }
-        USER_STATE.set(userId, { state: 'BROADCASTING_SOURCE_AWAITING' });
-        await bot.answerCallbackQuery(query.id, { text: 'Forward the message now.' });
-        await bot.editMessageText(`📢 **Universal Broadcast Setup**\n\n**Step 1/3:** **FORWARD** the message (text, photo, video, etc.) you want to broadcast to this chat.`, {
-            chat_id: chatId,
-            message_id: messageId,
-            parse_mode: 'Markdown'
-        });
-    }
-
-    // --- NEW: Stop Broadcast Job ---
-    else if (data === 'admin_stop_broadcast' && isAdmin(userId)) {
-        if (BROADCAST_STATUS.isSending) {
-            clearInterval(BROADCAST_STATUS.jobInterval);
-            BROADCAST_STATUS.isSending = false;
-            BROADCAST_STATUS.queue = [];
-            
-            await bot.answerCallbackQuery(query.id, { text: '❌ Broadcast job stopped.', show_alert: true });
-            
-            // Refresh admin panel
-            bot.emit('callback_query', { ...query, data: 'admin_panel' });
-        } else {
-            await bot.answerCallbackQuery(query.id, { text: 'No active broadcast to stop.', show_alert: true });
-        }
-    }
-
-    // --- NEW: Manual Cleanup Trigger ---
-    else if (data === 'admin_trigger_cleanup' && isAdmin(userId)) {
-        await bot.answerCallbackQuery(query.id, { text: '🧹 Running cleanup job...', show_alert: true });
-        const result = runMaintenanceJob();
-
-        await bot.editMessageText(`🧹 **Maintenance Report**\n\nCleaned ${result.cleanedFiles} expired files.\nCleaned ${result.cleanedCache} expired cache entries.`, {
-            chat_id: chatId,
-            message_id: messageId,
-            parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [[{ text: '🔙 Back to Admin', callback_data: 'admin_panel' }]]
+function findFile(id) {
+    let fileData = FILE_DATABASE.get(id);
+    if (!fileData) {
+        // Check custom aliases
+        for (const data of FILE_DATABASE.values()) {
+            if (data.customAlias === id) {
+                fileData = data;
+                break;
             }
-        });
-    }
-
-    // ... (The rest of the callbacks remain the same)
-    
-    else if (data === 'admin_stats' && isAdmin(userId)) {
-        const totalMemory = process.env.MEMORY_LIMIT || '512MB'; 
-        const usedMemory = process.memoryUsage().rss;
-        const dbSize = JSON.stringify([...FILE_DATABASE, ...USER_DATABASE]).length;
-
-        const statsText = `
-📊 <b>Global Statistics & System Health</b>
-
-<pre>⚠️ Free Tier Warning: In-memory database (Map) is volatile. Data will be lost upon server restart.</pre>
-
-👥 <b>Total Users:</b> ${USER_DATABASE.size}
-🏆 <b>Premium Users:</b> ${Array.from(USER_DATABASE.values()).filter(u => u.userType === 'PREMIUM').length}
-
-📁 <b>Total Files:</b> ${ANALYTICS.totalFiles}
-👁️ <b>Total Views:</b> ${ANALYTICS.totalViews}
-
-🌐 <b>System Health:</b>
-• Uptime: ${formatUptime(process.uptime())}
-• Database Size: ${formatFileSize(dbSize)} 
-• Memory Usage: ${formatFileSize(usedMemory)} / ${totalMemory}
-• Expired Cache Entries: ${URL_CACHE.size}
-
-`;
-        
-        await bot.editMessageText(statsText, {
-            chat_id: chatId,
-            message_id: messageId,
-            parse_mode: 'HTML',
-            reply_markup: {
-                inline_keyboard: [[{ text: '🔙 Back to Admin', callback_data: 'admin_panel' }]]
-            }
-        });
-    }
-
-    await bot.answerCallbackQuery(query.id);
-});
-
-// ============================================
-// MESSAGE HANDLER (MODIFIED for Universal Broadcast)
-// ============================================
-
-bot.on('message', async (msg) => {
-    const chatId = msg.chat.id;
-    const userId = msg.from.id;
-    const username = msg.from.username;
-    const firstName = msg.from.first_name;
-    
-    const user = registerUser(userId, username, firstName); 
-    
-    // 1. Block Check
-    if (user.isBlocked) { 
-        return bot.sendMessage(chatId, '❌ You have been **BLOCKED** by the admin from using this bot.', { parse_mode: 'Markdown' });
-    }
-
-    // 2. Admin State Check (Universal Broadcast)
-    if (isAdmin(userId) && USER_STATE.has(userId) && USER_STATE.get(userId).state.startsWith('BROADCASTING_')) {
-        const stateData = USER_STATE.get(userId);
-        
-        // Step 1: Receiving the source message
-        if (stateData.state === 'BROADCASTING_SOURCE_AWAITING') {
-            
-            if (!msg.message_id) { // Should not happen with a forwarded message
-                 return bot.sendMessage(chatId, '❌ Could not identify the message source. Broadcast cancelled.', { parse_mode: 'Markdown' });
-            }
-
-            USER_STATE.set(userId, { 
-                state: 'BROADCASTING_KEYBOARD_AWAITING', 
-                sourceChatId: msg.chat.id, // Source chat is where the message originated
-                sourceMessageId: msg.message_id 
-            });
-
-            await bot.sendMessage(chatId, `📢 **Universal Broadcast Setup**\n\n**Step 2/3:** Message source saved! Now send the KEYBOARD layout.\n\nFormat: \`Button Text|Button URL,Button 2 Text|Button 2 URL\`. Send \`NO_KEYBOARD\` if you don't need buttons.`, {
-                parse_mode: 'Markdown'
-            });
-            return;
-        }
-
-        // Step 2: Receiving the keyboard definition
-        if (stateData.state === 'BROADCASTING_KEYBOARD_AWAITING' && msg.text) {
-            const keyboardString = msg.text.trim();
-            let keyboard = null;
-            
-            if (keyboardString.toUpperCase() !== 'NO_KEYBOARD') {
-                try {
-                    // This parsing must be robust
-                    let parsedKeyboard = { inline_keyboard: [] };
-                    const rows = keyboardString.split(';'); 
-                    rows.forEach(rowString => {
-                        const rowButtons = rowString.split(',');
-                        const row = rowButtons.map(btnStr => {
-                            const parts = btnStr.split('|');
-                            if (parts.length !== 2) throw new Error('Invalid button format');
-                            return { text: parts[0].trim(), url: parts[1].trim() };
-                        });
-                        parsedKeyboard.inline_keyboard.push(row);
-                    });
-                    keyboard = parsedKeyboard;
-                } catch (e) {
-                    return bot.sendMessage(chatId, '❌ Invalid keyboard format. Try again or send `NO_KEYBOARD`.', { parse_mode: 'Markdown' });
-                }
-            }
-
-            BROADCAST_STATUS.keyboard = keyboard;
-
-            // Step 3: Confirmation and Execution
-            USER_STATE.delete(userId);
-            
-            const totalUsers = Array.from(USER_DATABASE.keys()).filter(id => !isAdmin(id)).length;
-
-            const confirmText = `
-📢 **Broadcast Confirmation**
-
-Total Recipients: **${totalUsers}**
-Interval: **${BROADCAST_INTERVAL_MS / 1000} seconds per message** (For Free Tier/Rate Limit Safety)
-Keyboard: ${keyboard ? '✅ Attached' : '❌ None'}
-
-Click **START BROADCAST** to begin. Do not restart the server while the broadcast is running!
-            `;
-            
-            await bot.sendMessage(chatId, confirmText, {
-                parse_mode: 'Markdown',
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ text: '🚀 START BROADCAST', callback_data: 'admin_broadcast_execute' }],
-                        [{ text: '❌ Cancel', callback_data: 'admin_panel' }]
-                    ]
-                }
-            });
-            
-            // Set final state for execution
-            USER_STATE.set(userId, { 
-                state: 'BROADCASTING_PENDING_EXECUTION', 
-                sourceChatId: stateData.sourceChatId,
-                sourceMessageId: stateData.sourceMessageId
-            });
-            return;
         }
     }
+    return fileData;
+}
 
-    // Handle the execution button press
-    if (msg.text === 'admin_broadcast_execute' && isAdmin(userId) && USER_STATE.get(userId)?.state === 'BROADCASTING_PENDING_EXECUTION') {
-        const stateData = USER_STATE.get(userId);
-        USER_STATE.delete(userId);
-        
-        startBroadcastJob(chatId, stateData.sourceMessageId);
-        await bot.sendMessage(chatId, '🚀 **Broadcast started in the background!** Check Admin Panel for status.', { parse_mode: 'Markdown' });
-        return;
-    }
-    
-    // 3. State Check (Renaming / Setting Alias)
-    if (USER_STATE.has(userId) && msg.text) {
-        // ... (Renaming and Alias logic remains the same) ...
-        const stateData = USER_STATE.get(userId);
-        const file = FILE_DATABASE.get(stateData.fileId);
-        
-        if (!file) {
-            USER_STATE.delete(userId);
-            return bot.sendMessage(chatId, '❌ Error: File not found.', { parse_mode: 'Markdown' });
-        }
-
-        if (stateData.state === 'RENAMING') {
-            const newName = msg.text.trim().substring(0, 60);
-            file.fileName = newName;
-            USER_STATE.delete(userId);
-            await bot.sendMessage(chatId, `✅ File successfully renamed to: **${newName}**`, { parse_mode: 'Markdown' });
-            return;
-        }
-
-        if (stateData.state === 'SETTING_ALIAS') {
-            const alias = msg.text.trim().toLowerCase();
-            
-            if (alias.length < 3 || alias.length > 30 || !/^[a-z0-9-]+$/.test(alias)) {
-                await bot.sendMessage(chatId, '❌ Invalid alias. Must be 3-30 characters, using only a-z, 0-9, and hyphens.', { parse_mode: 'Markdown' });
-                return;
-            }
-
-            let isUnique = !['stream', 'download', 'api', 'ping', 'admin'].includes(alias);
-            if (isUnique) {
-                for (const otherFile of FILE_DATABASE.values()) {
-                    if (otherFile.customAlias === alias && otherFile.uniqueId !== file.uniqueId) { 
-                        isUnique = false;
-                        break;
-                    }
-                }
-            }
-
-            if (!isUnique) {
-                await bot.sendMessage(chatId, `❌ Alias **${alias}** is already in use or is a reserved word. Choose a different one.`, { parse_mode: 'Markdown' });
-                return;
-            }
-
-            file.customAlias = alias;
-            USER_STATE.delete(userId);
-            await bot.sendMessage(chatId, `✅ Custom alias set! Your new stream link is:\n\n<code>${WEBAPP_URL}/stream/${alias}</code>`, { parse_mode: 'HTML', disable_web_page_preview: true });
-            return;
-        }
-    }
-
-
-    if (msg.text && msg.text.startsWith('/')) return;
-    
-    // 4. Force Join Check
-    const isMember = await checkMembership(userId);
-    if (!isMember) {
-        return bot.sendMessage(chatId, '⚠️ **ACCESS DENIED**\n\nYou must join our main channel to use this bot.', { 
-            parse_mode: 'Markdown',
-            reply_markup: getForceJoinKeyboard()
-        });
-    }
-    
-    const file = msg.video || msg.document || msg.video_note || msg.photo; // Added photo check for completeness, though stream link usually means video
-    
-    if (!file) return;
-
-    // 5. Limit Enforcement
-    const limitCheck = canGenerateLink(userId);
-
-    if (!limitCheck.allowed) {
-        return bot.sendMessage(chatId, `
-❌ <b>Link Generation Failed</b>
-
-You have reached your limit of <b>${limitCheck.limit}</b> links for your <b>${limitCheck.userType}</b> tier.
-You have used <b>${limitCheck.current}</b> links.
-
-Upgrade to Premium or invite friends to increase your limit!
-        `, { parse_mode: 'HTML' });
-    }
-    
+async function checkMembership(userId) {
+    if (isAdmin(userId)) return true; 
     try {
-        // ... (File upload logic remains the same) ...
-        const fileId = Array.isArray(file) ? file[file.length - 1].file_id : file.file_id;
-        const fileUniqueId = Array.isArray(file) ? file[file.length - 1].file_unique_id : file.file_unique_id;
-        const fileName = file.file_name || (msg.caption || `file_${fileUniqueId}.mp4`);
-        const fileSize = file.file_size || (Array.isArray(file) ? file[file.length - 1].file_size : 0);
-        
-        const processingMsg = await bot.sendMessage(chatId, '⏳ <b>Processing your video...</b>', { parse_mode: 'HTML' });
-        await sleep(1000);
-        
-        const uniqueId = generateUniqueId();
-        
-        FILE_DATABASE.set(uniqueId, {
-            uniqueId: uniqueId, // Make sure uniqueId is stored consistently
-            fileId: fileId,
-            fileUniqueId: fileUniqueId,
-            fileName: fileName,
-            fileSize: fileSize,
-            uploadedBy: userId,
-            uploaderName: firstName,
-            chatId: chatId,
-            createdAt: Date.now(),
-            views: 0,
-            downloads: 0,
-            lastAccessed: Date.now(),
-            customAlias: null 
-        });
-        
-        user.totalUploads++;
-        ANALYTICS.totalFiles++;
-        
-        const streamLink = `${WEBAPP_URL}/stream/${uniqueId}`;
-        const downloadLink = `${WEBAPP_URL}/download/${uniqueId}`;
-        
-        await bot.deleteMessage(chatId, processingMsg.message_id);
-
-        const linkStatus = user.userType === 'PREMIUM' || user.userType === 'ADMIN' ? 'PERMANENT' : 'Expires in 30 days.';
-        
-        const successText = `
-✅ <b>Permanent Link Generated Successfully!</b>
-
-📁 <b>File Name:</b> ${fileName}
-💾 <b>File Size:</b> ${formatFileSize(fileSize)}
-🆔 <b>Unique ID:</b> <code>${uniqueId}</code>
-
-🔗 <b>Streaming Link:</b>
-<code>${streamLink}</code>
-
-⬇️ <b>Download Link:</b>
-<code>${downloadLink}</code>
-
-<b>✨ Link Status:</b> ${linkStatus}
-
-💡 <i>Your current link count: ${user.totalUploads} / ${limitCheck.limit}</i>
-        `;
-        
-        await bot.sendMessage(chatId, successText, {
-            parse_mode: 'HTML',
-            disable_web_page_preview: true,
-            reply_markup: {
-                inline_keyboard: [
-                    [
-                        { text: '🔗 Open Stream', url: streamLink },
-                        { text: '⬇️ Download', url: downloadLink }
-                    ],
-                    [
-                        { text: '📊 View Stats', callback_data: `file_stats_${uniqueId}` },
-                        { text: '🗑️ Delete File', callback_data: `delete_file_${uniqueId}` }
-                    ],
-                    [
-                        { text: '📢 Share to Channel', url: `https://t.me/share/url?url=${encodeURIComponent(streamLink)}` }
-                    ]
-                ]
-            }
-        });
-        
-    } catch (error) {
-        console.error('❌ Upload error:', error);
-        await bot.sendMessage(chatId, '❌ <b>Error generating link.</b>\n\nPlease try again or contact admin.', {
-            parse_mode: 'HTML'
-        });
+        const member = await bot.getChatMember(MANDATORY_CHANNEL_ID, userId);
+        const status = member.status;
+        return ['member', 'administrator', 'creator'].includes(status); 
+    } catch (e) {
+        return false; 
     }
-});
-
-
-// ============================================
-// MAINTENANCE AND UTILITY FUNCTIONS
-// ============================================
-
-// ... (formatUptime, generateUniqueId, formatFileSize, formatDate, sleep, getFreshFileUrl, findFile, Express Server routes remain the same) ...
-
-// Maintenance interval runs every 4 hours
-setInterval(() => {
-    const result = runMaintenanceJob();
-    if (result.cleanedFiles > 0 || result.cleanedCache > 0) {
-        console.log(`🧹 Scheduled Maintenance Report: Cleaned ${result.cleanedFiles} expired files and ${result.cleanedCache} cache entries.`);
-    }
-}, 4 * 60 * 60 * 1000); 
-
-// ... (Rest of the code: Express server, startup logs, shutdown handlers)
-function formatUptime(seconds) {
-    const days = Math.floor(seconds / 86400);
-    const hours = Math.floor((seconds % 86400) / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    if (days > 0) return `${days}d ${hours}h`;
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    return `${minutes}m`;
 }
-
-function generateUniqueId() {
-    return Math.random().toString(36).substring(2, 15) + 
-           Math.random().toString(36).substring(2, 15);
-}
-
-function formatFileSize(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
-}
-
-function formatDate(timestamp) {
-    const date = new Date(timestamp);
-    return date.toLocaleDateString('en-US', { 
-        month: 'short', 
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-    });
-}
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// ... (Rest of the Express and server setup) ...
 
 async function getFreshFileUrl(fileData) {
     const cacheKey = fileData.fileId;
@@ -762,33 +220,702 @@ async function getFreshFileUrl(fileData) {
         
         return fileUrl;
     } catch (error) {
-        console.error('❌ Error getting file URL:', error);
-        throw new Error('Failed to get file from Telegram');
+        console.error('❌ Error getting file URL from Telegram:', error);
+        URL_CACHE.delete(cacheKey);
+        throw new Error('Failed to get file from Telegram API');
     }
 }
 
-function findFile(lookupId) {
-    let fileData = FILE_DATABASE.get(lookupId);
 
-    if (!fileData) {
-        for (const data of FILE_DATABASE.values()) {
-            if (data.customAlias === lookupId) {
-                fileData = data;
-                break;
+// ============================================
+// KEYBOARD & TEXT GENERATION
+// ============================================
+
+function getForceJoinKeyboard() {
+    return {
+        inline_keyboard: [
+            [{ text: `📢 Join ${CHANNEL_USERNAME}`, url: `https://t.me/${CHANNEL_USERNAME.replace('@', '')}` }],
+            [{ text: '✅ I have joined', callback_data: 'check_join' }]
+        ]
+    };
+}
+
+function getMainKeyboard(isAdmin = false) {
+    const keyboard = [
+        [
+            { text: '📊 My Stats', callback_data: 'my_stats' },
+            { text: '📁 My Files', callback_data: 'my_files_0' } // Start at page 0
+        ],
+        [
+            { text: '📖 Bot Help', callback_data: 'help' }, 
+            { text: '💎 Upgrade Premium', callback_data: 'premium_info' } 
+        ]
+    ];
+    
+    if (isAdmin) {
+        keyboard.push([
+            { text: '👑 Admin Panel', callback_data: 'admin_panel' }
+        ]);
+    }
+    
+    return { inline_keyboard: keyboard };
+}
+
+function getAdminKeyboard() {
+    const isBroadcasting = BROADCAST_STATUS.isSending;
+    const broadcastText = isBroadcasting ? `⏳ Broadcast in Progress` : '📢 Universal Broadcast';
+
+    return {
+        inline_keyboard: [
+            [
+                { text: '📊 Statistics', callback_data: 'admin_stats' },
+                { text: '👥 Manage Users', callback_data: 'admin_users_1' } 
+            ],
+            [
+                { text: broadcastText, callback_data: isBroadcasting ? 'admin_stop_broadcast' : 'admin_broadcast_start' }, 
+                { text: '🧹 Cleanup Links/Cache', callback_data: 'admin_trigger_cleanup' }
+            ],
+            [
+                { text: '🔙 Back', callback_data: 'start' }
+            ]
+        ]
+    };
+}
+
+function getFileActionsKeyboard(fileId, userType) {
+    const file = FILE_DATABASE.get(fileId);
+    if (!file) return { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'my_files_0' }]] };
+
+    const idOrAlias = file.customAlias || fileId;
+    const streamLink = `${WEBAPP_URL}/stream/${idOrAlias}`;
+    const downloadLink = `${WEBAPP_URL}/download/${idOrAlias}`;
+    const isPermanent = isFilePermanent(fileId);
+    
+    let statusRow = [];
+    if (!isPermanent) {
+        const remainingTime = formatRemainingTime(file.createdAt); 
+        statusRow.push({ text: `⚠️ Expires in ${remainingTime}`, callback_data: 'premium_info' });
+    }
+
+    const aliasButton = [];
+    if (userType === 'PREMIUM' || userType === 'ADMIN') {
+        const alias = file.customAlias ? `🏷️ Alias: ${file.customAlias}` : '🏷️ Set Custom Alias';
+        aliasButton.push({ text: alias, callback_data: `alias_file_${fileId}` });
+    }
+
+    return {
+        inline_keyboard: [
+            statusRow.length > 0 ? statusRow : [], 
+            [
+                { text: '🔗 Open Stream', url: streamLink },
+                { text: '⬇️ Download', url: downloadLink }
+            ],
+            [
+                { text: '📊 Stats', callback_data: `file_stats_${fileId}` },
+                { text: '🗑️ Delete', callback_data: `delete_file_${fileId}` }
+            ],
+            [
+                { text: '📝 Rename', callback_data: `rename_file_${fileId}` }, 
+                ...aliasButton 
+            ],
+            [
+                { text: '🔙 Back to Files', callback_data: 'my_files_0' }
+            ]
+        ].filter(row => row.length > 0)
+    };
+}
+
+
+// ============================================
+// MAINTENANCE & BROADCAST JOBS
+// ============================================
+
+function runMaintenanceJob() {
+    const now = Date.now();
+    let cleanedFiles = 0;
+    let cleanedCache = 0;
+
+    // 1. File Expiration Cleanup
+    for (const [id, file] of FILE_DATABASE.entries()) {
+        const uploader = USER_DATABASE.get(file.uploadedBy);
+        const uploaderType = uploader ? uploader.userType : 'NORMAL';
+
+        if (uploaderType === 'NORMAL' && (now - file.createdAt) > NORMAL_USER_EXPIRY) {
+            
+            FILE_DATABASE.delete(id);
+            ANALYTICS.totalFiles--;
+            if (uploader) {
+                uploader.totalUploads = Math.max(0, uploader.totalUploads - 1);
             }
+
+            cleanedFiles++;
+
+            bot.sendMessage(file.uploadedBy, `🗑️ **Your file has expired!**\n\nThe link for **${file.fileName}** has been removed after 30 days. Your link slot has been reclaimed.`, {
+                parse_mode: 'Markdown'
+            }).catch(() => {});
         }
     }
-    // Set the uniqueId property for consistency when returning from alias lookup
-    if (fileData && !fileData.uniqueId) {
-        fileData.uniqueId = lookupId;
+
+    // 2. URL Cache Cleanup
+    for (const [key, value] of URL_CACHE.entries()) {
+        if (now - value.timestamp > URL_CACHE_DURATION) {
+            URL_CACHE.delete(key);
+            cleanedCache++;
+        }
     }
-    return fileData;
+    
+    return { cleanedFiles, cleanedCache };
+}
+
+function startBroadcastJob(chatId, sourceMessageId, keyboard) {
+    if (BROADCAST_STATUS.isSending) return;
+
+    BROADCAST_STATUS.isSending = true;
+    BROADCAST_STATUS.sourceChatId = chatId;
+    BROADCAST_STATUS.sourceMessageId = sourceMessageId;
+    BROADCAST_STATUS.keyboard = keyboard;
+    BROADCAST_STATUS.queue = Array.from(USER_DATABASE.keys())
+        .filter(id => !isAdmin(id) && !USER_DATABASE.get(id).isBlocked); 
+    BROADCAST_STATUS.sentCount = 0;
+    BROADCAST_STATUS.failedCount = 0;
+
+    const totalUsers = BROADCAST_STATUS.queue.length;
+    
+    bot.sendMessage(chatId, `🚀 **Broadcast started!**\n\nTargeting ${totalUsers} non-admin users. Progress will update automatically.`, { parse_mode: 'Markdown' });
+
+    const intervalHandler = setInterval(async () => {
+        if (BROADCAST_STATUS.queue.length === 0) {
+            clearInterval(BROADCAST_STATUS.jobInterval);
+            BROADCAST_STATUS.isSending = false;
+            
+            bot.sendMessage(chatId, `✅ **Broadcast Complete!**\n\nTotal Users: ${totalUsers}\nSent: ${BROADCAST_STATUS.sentCount}\nFailed: ${BROADCAST_STATUS.failedCount}`, { parse_mode: 'Markdown' });
+            return;
+        }
+
+        const targetId = BROADCAST_STATUS.queue.shift();
+        
+        try {
+            await bot.copyMessage(
+                targetId,
+                BROADCAST_STATUS.sourceChatId,
+                BROADCAST_STATUS.sourceMessageId,
+                { reply_markup: BROADCAST_STATUS.keyboard }
+            );
+            BROADCAST_STATUS.sentCount++;
+        } catch (error) {
+            // User blocked bot or chat is invalid
+            if (error.response && error.response.statusCode === 403) {
+                 const user = USER_DATABASE.get(targetId);
+                 if (user) user.isBlocked = true; // Mark as blocked for future cleanup
+            }
+            BROADCAST_STATUS.failedCount++;
+        }
+    }, BROADCAST_INTERVAL_MS);
+
+    BROADCAST_STATUS.jobInterval = intervalHandler;
 }
 
 
-// EXPRESS SERVER (Modified to use uniqueId check)
-const app = express();
+// ============================================
+// FEATURE: UNIVERSAL AUTO-ACCEPT JOIN REQUESTS
+// ============================================
 
+bot.on('chat_join_request', async (joinRequest) => {
+    const userId = joinRequest.from.id;
+    const chatId = joinRequest.chat.id; 
+    const firstName = joinRequest.from.first_name;
+    const chatTitle = joinRequest.chat.title || 'the channel';
+
+    try {
+        await bot.approveChatJoinRequest(chatId, userId);
+        
+        const welcomeMessage = `
+🎉 **Welcome, ${firstName}!**
+
+Your request to join **${chatTitle}** has been automatically approved.
+            
+**🚀 Start Using the Bot Now:** /start
+        `;
+        
+        await bot.sendMessage(userId, welcomeMessage, { parse_mode: 'Markdown' });
+        
+        console.log(`✅ Auto-Approved join request for ${firstName} (${userId}) in channel ${chatTitle} (${chatId})`);
+
+    } catch (error) {
+        console.error(`❌ Failed to approve join request for ${userId} in ${chatTitle}:`, error.message);
+        bot.declineChatJoinRequest(chatId, userId).catch(() => {});
+    }
+});
+
+
+// ============================================
+// BOT COMMANDS - START & REFERRAL LOGIC
+// ============================================
+
+bot.onText(/\/start(?:\s+(\d+))?/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const username = msg.from.username;
+    const firstName = msg.from.first_name;
+    
+    const referrerId = match ? parseInt(match[1]) : null;
+    let user = registerUser(userId, username, firstName); 
+
+    // Referral Logic
+    if (referrerId && referrerId !== userId && !user.referrerId) {
+         user.referrerId = referrerId;
+         
+         const referrer = USER_DATABASE.get(referrerId);
+         if (referrer) {
+             referrer.referralBonus = (referrer.referralBonus || 0) + 1; // 1 extra link slot
+             bot.sendMessage(referrerId, `🎁 You earned **1 FREE link slot**! **${firstName}** joined using your link.`, { parse_mode: 'Markdown' }).catch(() => {});
+         }
+    }
+    
+    if (user.isBlocked) {
+         return bot.sendMessage(chatId, '❌ You have been **BLOCKED**...', { parse_mode: 'Markdown' });
+    }
+
+    // Force Join Check
+    const isMember = await checkMembership(userId);
+    if (!isMember) {
+        return bot.sendMessage(chatId, '⚠️ **ACCESS DENIED**\n\nYou must join our main channel to use this bot.', { 
+            parse_mode: 'Markdown',
+            reply_markup: getForceJoinKeyboard()
+        });
+    }
+
+    const limitCheck = canGenerateLink(userId);
+    const welcomeText = `
+🎬 <b>Welcome to BeatAnimes Link Generator!</b>
+
+${firstName}, I'm here to help you create <b>permanent streaming links</b> for your videos! 🚀
+
+<b>✨ Your Current Plan: ${getUserType(userId)}</b>
+- Links ${limitCheck.userType === 'NORMAL' ? `expire after 30 days.` : 'NEVER expire (Permanent!).'}
+- Upload Limit: ${limitCheck.current} / ${limitCheck.limit} (Total limit includes ${user.referralBonus} bonus slots.)
+
+<b>🎯 Quick Start:</b> Just send me any video file!
+
+<b>👥 Users:</b> ${ANALYTICS.totalUsers}
+<b>📁 Files:</b> ${ANALYTICS.totalFiles}
+    `;
+    
+    const keyboard = getMainKeyboard(isAdmin(userId));
+    
+    if (WELCOME_PHOTO_ID) {
+        try {
+            await bot.sendPhoto(chatId, WELCOME_PHOTO_ID, {
+                caption: welcomeText, parse_mode: 'HTML', reply_markup: keyboard
+            });
+        } catch (error) {
+            await bot.sendMessage(chatId, welcomeText, { parse_mode: 'HTML', reply_markup: keyboard });
+        }
+    } else {
+        await bot.sendMessage(chatId, welcomeText, { parse_mode: 'HTML', reply_markup: keyboard });
+    }
+});
+
+
+// ============================================
+// CALLBACK QUERY HANDLER (Full implementation)
+// ============================================
+
+bot.on('callback_query', async (query) => {
+    const chatId = query.message.chat.id;
+    const userId = query.from.id;
+    const data = query.data;
+    const messageId = query.message.message_id;
+    const user = USER_DATABASE.get(userId) || registerUser(userId, query.from.username, query.from.first_name);
+
+    if (user.isBlocked) { 
+        return bot.answerCallbackQuery(query.id, { text: '❌ You are blocked from using the bot.', show_alert: true }); 
+    }
+
+    // Force Join Check
+    const isMember = await checkMembership(userId);
+    if (!isMember && !isAdmin(userId) && data !== 'check_join' && data !== 'start' && data !== 'premium_info') {
+        await bot.answerCallbackQuery(query.id, { text: '⚠️ You must join the channel to continue.', show_alert: true });
+        return;
+    }
+
+    // --- Core Commands ---
+    if (data === 'start') {
+        try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
+        bot.emit('message', { ...query.message, text: '/start', from: query.from, chat: { id: chatId } });
+        return bot.answerCallbackQuery(query.id);
+    }
+    if (data === 'check_join') {
+        const isMember = await checkMembership(userId);
+        if (isMember) {
+            bot.emit('message', { ...query.message, text: '/start', from: query.from, chat: { id: chatId } });
+            return bot.answerCallbackQuery(query.id, { text: '✅ Access Granted! Welcome!', show_alert: true });
+        } else {
+            return bot.answerCallbackQuery(query.id, { text: '⚠️ Still not a member. Please join and try again.', show_alert: true });
+        }
+    }
+    if (data === 'my_stats') {
+        const limitCheck = canGenerateLink(userId);
+        const totalViews = Array.from(FILE_DATABASE.values()).filter(f => f.uploadedBy === userId).reduce((sum, f) => sum + f.views, 0);
+        const statsText = `
+📊 <b>Your Statistics</b>
+
+✨ <b>Your Tier:</b> ${limitCheck.userType}
+📁 <b>Your Uploads:</b> ${limitCheck.current} / ${limitCheck.limit}
+➕ <b>Referral Bonus Slots:</b> ${user.referralBonus}
+📈 <b>Total Views on Your Files:</b> ${totalViews}
+        `;
+        await bot.editMessageText(statsText, {
+            chat_id: chatId, message_id: messageId, parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start' }]] }
+        });
+    }
+
+    // --- My Files List (with Pagination) ---
+    const PAGE_SIZE = 5;
+    if (data.startsWith('my_files_')) {
+        const page = parseInt(data.substring(9)) || 0;
+        const myFiles = Array.from(FILE_DATABASE.values()).filter(f => f.uploadedBy === userId);
+        const totalPages = Math.ceil(myFiles.length / PAGE_SIZE);
+        const filesToShow = myFiles.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+        if (myFiles.length === 0) {
+            await bot.editMessageText('❌ You have not uploaded any files yet. Send me a video!', {
+                chat_id: chatId, message_id: messageId, parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start' }]] }
+            });
+            return;
+        }
+
+        const filesList = filesToShow.map((f, i) => `${(page * PAGE_SIZE) + i + 1}. ${f.fileName} (${formatFileSize(f.fileSize)})`).join('\n');
+        
+        const navigationRow = [];
+        if (page > 0) navigationRow.push({ text: '◀️ Prev', callback_data: `my_files_${page - 1}` });
+        if (page < totalPages - 1) navigationRow.push({ text: 'Next ▶️', callback_data: `my_files_${page + 1}` });
+
+        await bot.editMessageText(`📁 <b>Your Files</b> (Page ${page + 1} of ${totalPages})\n\n${filesList}`, {
+            chat_id: chatId, message_id: messageId, parse_mode: 'HTML',
+            reply_markup: {
+                inline_keyboard: filesToShow.map(f => ([{ text: f.fileName, callback_data: `file_${f.uniqueId}` }]))
+                .concat([navigationRow])
+                .concat([[ { text: '🔙 Back', callback_data: 'start' } ]])
+            }
+        });
+    }
+    // --- File Details and Actions ---
+    else if (data.startsWith('file_stats_')) {
+        const fileId = data.substring(11);
+        const file = FILE_DATABASE.get(fileId);
+        if (!file || file.uploadedBy !== userId) return;
+
+        const statsText = `
+📊 <b>Stats for: ${file.fileName}</b>
+👁️ Views: ${file.views}
+⬇️ Downloads: ${file.downloads}
+📅 Uploaded: ${new Date(file.createdAt).toLocaleDateString()}
+        `;
+        await bot.editMessageText(statsText, {
+            chat_id: chatId, message_id: messageId, parse_mode: 'HTML',
+            reply_markup: getFileActionsKeyboard(fileId, user.userType)
+        });
+    }
+    else if (data.startsWith('file_')) {
+        const fileId = data.substring(5);
+        const file = FILE_DATABASE.get(fileId);
+        if (!file || file.uploadedBy !== userId) return; // Access denied check
+        
+        const fileText = `
+📁 <b>File Details:</b>
+Name: ${file.fileName}
+Size: ${formatFileSize(file.fileSize)}
+Alias: ${file.customAlias || 'None'}
+Views: ${file.views} | Downloads: ${file.downloads}
+        `;
+        await bot.editMessageText(fileText, {
+            chat_id: chatId, message_id: messageId, parse_mode: 'HTML',
+            reply_markup: getFileActionsKeyboard(fileId, user.userType)
+        });
+    }
+    else if (data.startsWith('delete_file_')) {
+        const fileId = data.substring(12);
+        const file = FILE_DATABASE.get(fileId);
+        if (!file || file.uploadedBy !== userId) return;
+        
+        FILE_DATABASE.delete(fileId);
+        user.totalUploads = Math.max(0, user.totalUploads - 1);
+        ANALYTICS.totalFiles--;
+
+        await bot.answerCallbackQuery(query.id, { text: `✅ File ${file.fileName} deleted. Slot reclaimed.`, show_alert: true });
+        bot.emit('callback_query', { ...query, data: 'my_files_0' }); 
+    }
+
+
+    // --- Admin Panel Commands (Full implementation) ---
+    else if (data === 'admin_panel' && isAdmin(userId)) {
+        const adminText = `
+👑 <b>Admin Panel</b>
+
+Welcome Admin!
+• Users: ${USER_DATABASE.size}
+• Files: ${FILE_DATABASE.size}
+• Chats/Channels: ${CHAT_DATABASE.size}
+
+Choose an option below:
+        `;
+        await bot.editMessageText(adminText, {
+            chat_id: chatId, message_id: messageId, parse_mode: 'HTML',
+            reply_markup: getAdminKeyboard()
+        });
+    }
+    else if (data === 'admin_stats' && isAdmin(userId)) {
+        let totalSize = 0;
+        for (const file of FILE_DATABASE.values()) { totalSize += file.fileSize || 0; }
+        
+        const uptime = process.uptime();
+        const statsText = `
+📊 <b>Detailed Statistics</b>
+
+👥 <b>Total Users:</b> ${USER_DATABASE.size}
+📣 <b>Total Chats/Channels:</b> ${CHAT_DATABASE.size}
+📁 <b>Total Files:</b> ${FILE_DATABASE.size}
+💾 <b>Total Storage:</b> ${formatFileSize(totalSize)}
+👁️ <b>Total Views:</b> ${ANALYTICS.totalViews}
+⬇️ <b>Total Downloads:</b> ${ANALYTICS.totalDownloads}
+⏱️ <b>Uptime:</b> ${formatUptime(uptime)}
+        `;
+        
+        await bot.editMessageText(statsText, {
+            chat_id: chatId, message_id: messageId, parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'admin_panel' }]] }
+        });
+    }
+    else if (data === 'admin_trigger_cleanup' && isAdmin(userId)) {
+        await bot.answerCallbackQuery(query.id, { text: '🧹 Running cleanup job...', show_alert: true });
+        const result = runMaintenanceJob(); 
+        
+        await bot.editMessageText(`🧹 **Maintenance Report**\n\nCleaned ${result.cleanedFiles} expired files.\nCleaned ${result.cleanedCache} expired cache entries.`, {
+            chat_id: chatId, message_id: messageId, parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: '🔙 Back to Admin', callback_data: 'admin_panel' }]] }
+        });
+    }
+    else if (data === 'admin_broadcast_start' && isAdmin(userId)) {
+        if (BROADCAST_STATUS.isSending) {
+             return bot.answerCallbackQuery(query.id, { text: '❌ Broadcast is already running.', show_alert: true });
+        }
+        USER_STATE.set(userId, { state: 'BROADCASTING_MESSAGE_SETUP' });
+        await bot.editMessageText('📢 **Universal Broadcast Setup**\n\n**STEP 1:** Send the message (text, photo, video, etc.) you want to broadcast to all users.', {
+            chat_id: chatId, message_id: messageId, parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'admin_panel' }]] }
+        });
+    }
+    else if (data === 'admin_stop_broadcast' && isAdmin(userId)) {
+        if (BROADCAST_STATUS.jobInterval) {
+            clearInterval(BROADCAST_STATUS.jobInterval);
+            BROADCAST_STATUS.isSending = false;
+            BROADCAST_STATUS.queue = [];
+            
+            await bot.answerCallbackQuery(query.id, { text: '❌ Broadcast job stopped.', show_alert: true });
+            bot.emit('callback_query', { ...query, data: 'admin_panel' });
+        } else {
+            await bot.answerCallbackQuery(query.id, { text: 'No active broadcast to stop.', show_alert: true });
+        }
+    }
+    
+    await bot.answerCallbackQuery(query.id);
+});
+
+
+// ============================================
+// MESSAGE HANDLER (File Upload & Multi-step State)
+// ============================================
+
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const username = msg.from.username;
+    const firstName = msg.from.first_name;
+    
+    const user = registerUser(userId, username, firstName); 
+
+    // 1. Channel Tracking 
+    if (msg.chat.type !== 'private') {
+        CHAT_DATABASE.set(chatId, { id: chatId, title: msg.chat.title, type: msg.chat.type, lastActive: Date.now() });
+    }
+    
+    if (user.isBlocked) return;
+    
+    // 2. Admin State Check (Broadcast)
+    if (isAdmin(userId) && USER_STATE.has(userId) && USER_STATE.get(userId).state.startsWith('BROADCASTING_')) {
+        const stateData = USER_STATE.get(userId);
+        
+        if (stateData.state === 'BROADCASTING_MESSAGE_SETUP' && (msg.text || msg.photo || msg.video || msg.document)) {
+            stateData.messageId = msg.message_id;
+            stateData.state = 'BROADCASTING_KEYBOARD_SETUP';
+            USER_STATE.set(userId, stateData);
+            
+            await bot.sendMessage(chatId, '📢 **Universal Broadcast Setup**\n\n**STEP 2:** Send the inline keyboard markup in JSON format (e.g., `[[{"text":"Go","url":"https://example.com"}]]`) or send **"SKIP"** to proceed without a button.', {
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'admin_panel' }]] }
+            });
+            return;
+        }
+
+        if (stateData.state === 'BROADCASTING_KEYBOARD_SETUP' && msg.text) {
+            let keyboard = null;
+            let text = msg.text.trim();
+            
+            if (text.toUpperCase() !== 'SKIP') {
+                try {
+                    const parsedKeyboard = JSON.parse(text);
+                    if (!Array.isArray(parsedKeyboard)) throw new Error('Not an array');
+                    keyboard = { inline_keyboard: parsedKeyboard };
+                } catch (e) {
+                    return bot.sendMessage(chatId, '❌ Invalid JSON format for keyboard. Please re-send valid JSON or "SKIP".', { parse_mode: 'Markdown' });
+                }
+            }
+            
+            USER_STATE.delete(userId);
+            
+            // Start the broadcast
+            startBroadcastJob(chatId, stateData.messageId, keyboard);
+            return;
+        }
+    }
+    
+    // 3. User State Check (Renaming / Setting Alias)
+    if (USER_STATE.has(userId) && msg.text) {
+        const stateData = USER_STATE.get(userId);
+        const file = FILE_DATABASE.get(stateData.fileId);
+
+        if (stateData.state === 'RENAMING_FILE') {
+            file.fileName = msg.text.trim();
+            USER_STATE.delete(userId);
+            await bot.sendMessage(chatId, `✅ File renamed to **${file.fileName}**!`, { parse_mode: 'Markdown' });
+            return bot.emit('callback_query', { message: msg, from: msg.from, data: 'file_' + file.uniqueId });
+        }
+
+        if (stateData.state === 'SETTING_ALIAS') {
+            const alias = msg.text.trim().toLowerCase();
+            const aliasRegex = /^[a-z0-9-]+$/;
+            
+            if (!aliasRegex.test(alias) || alias.length < 3 || alias.length > 30) {
+                 return bot.sendMessage(chatId, `❌ Invalid alias. Use 3-30 characters (a-z, 0-9, hyphens only).`, { parse_mode: 'Markdown' });
+            }
+
+            let isUnique = !findFile(alias); 
+            
+            if (isUnique) {
+                file.customAlias = alias;
+                USER_STATE.delete(userId);
+                await bot.sendMessage(chatId, `✅ Custom alias set! Your new stream link is:\n\n<code>${WEBAPP_URL}/stream/${alias}</code>`, { parse_mode: 'HTML', disable_web_page_preview: true });
+            } else {
+                await bot.sendMessage(chatId, `❌ Alias **${alias}** is already in use.`, { parse_mode: 'Markdown' });
+            }
+            return bot.emit('callback_query', { message: msg, from: msg.from, data: 'file_' + file.uniqueId });
+        }
+    }
+    
+    // 4. Force Join Check
+    const isMember = await checkMembership(userId);
+    if (!isMember) {
+        return bot.sendMessage(chatId, '⚠️ **ACCESS DENIED**\n\nYou must join our main channel to use this bot.', { 
+            parse_mode: 'Markdown',
+            reply_markup: getForceJoinKeyboard()
+        });
+    }
+    
+    // 5. File Upload Logic
+    const file = msg.video || msg.document || msg.video_note || msg.photo;
+    
+    if (!file) return;
+
+    // Limit Enforcement
+    const limitCheck = canGenerateLink(userId);
+
+    if (!limitCheck.allowed) {
+        return bot.sendMessage(chatId, `
+❌ <b>Link Generation Failed</b>
+
+You have reached your limit of <b>${limitCheck.limit}</b> links for your <b>${limitCheck.userType}</b> tier.
+        `, { parse_mode: 'HTML' });
+    }
+    
+    try {
+        const fileId = Array.isArray(file) ? file[file.length - 1].file_id : file.file_id;
+        const fileUniqueId = Array.isArray(file) ? file[file.length - 1].file_unique_id : file.file_unique_id;
+        const fileName = file.file_name || (msg.caption || `file_${fileUniqueId}.mp4`);
+        const fileSize = file.file_size || (Array.isArray(file) ? file[file.length - 1].file_size : 0);
+        
+        const uniqueId = generateUniqueId();
+        
+        FILE_DATABASE.set(uniqueId, {
+            uniqueId: uniqueId,
+            fileId: fileId,
+            fileUniqueId: fileUniqueId,
+            fileName: fileName,
+            fileSize: fileSize,
+            uploadedBy: userId,
+            uploaderName: firstName,
+            chatId: chatId,
+            createdAt: Date.now(),
+            views: 0,
+            downloads: 0,
+            lastAccessed: Date.now(),
+            customAlias: null
+        });
+        
+        user.totalUploads++;
+        ANALYTICS.totalFiles++;
+        
+        const streamLink = `${WEBAPP_URL}/stream/${uniqueId}`;
+        const downloadLink = `${WEBAPP_URL}/download/${uniqueId}`;
+        
+        const linkStatus = limitCheck.userType === 'PREMIUM' || limitCheck.userType === 'ADMIN' ? 'PERMANENT' : `Expires in ${formatRemainingTime(Date.now())}.`;
+        
+        const successText = `
+✅ <b>Permanent Link Generated Successfully!</b>
+
+📁 <b>File Name:</b> ${fileName}
+💾 <b>File Size:</b> ${formatFileSize(fileSize)}
+
+🔗 <b>Streaming Link:</b>
+<code>${streamLink}</code>
+
+<b>✨ Link Status:</b> ${linkStatus}
+
+💡 <i>Your current link count: ${user.totalUploads} / ${limitCheck.limit}</i>
+        `;
+        
+        await bot.sendMessage(chatId, successText, {
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: {
+                inline_keyboard: [
+                    [
+                        { text: '🔗 Open Stream', url: streamLink },
+                        { text: '⬇️ Download', url: downloadLink }
+                    ],
+                    [
+                        { text: '📊 View Stats', callback_data: `file_stats_${uniqueId}` },
+                        { text: '🗑️ Delete File', callback_data: `delete_file_${uniqueId}` }
+                    ]
+                ]
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Upload error:', error);
+        await bot.sendMessage(chatId, '❌ <b>Error generating link.</b>\n\nPlease try again or contact admin.', {
+            parse_mode: 'HTML'
+        });
+    }
+});
+
+
+// ============================================
+// EXPRESS SERVER (Streaming & Downloading with Range Support)
+// ============================================
+const app = express();
 app.use(express.json());
 app.use(express.static('public'));
 
@@ -801,220 +928,101 @@ app.use((req, res, next) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BeatAnimes Link Generator</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-        }
-        .container {
-            text-align: center;
-            padding: 40px;
-            background: rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-            max-width: 600px;
-        }
-        h1 { font-size: 3em; margin-bottom: 20px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
-        p { font-size: 1.2em; margin-bottom: 30px; opacity: 0.9; }
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 20px;
-            margin: 30px 0;
-        }
-        .stat-card {
-            background: rgba(255, 255, 255, 0.2);
-            padding: 20px;
-            border-radius: 10px;
-            backdrop-filter: blur(5px);
-        }
-        .stat-number { font-size: 2em; font-weight: bold; }
-        .stat-label { opacity: 0.8; margin-top: 5px; }
-        .btn {
-            display: inline-block;
-            padding: 15px 40px;
-            background: white;
-            color: #667eea;
-            text-decoration: none;
-            border-radius: 50px;
-            font-weight: bold;
-            font-size: 1.1em;
-            transition: transform 0.3s;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-        }
-        .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3); }
-        .features {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 15px;
-            margin: 30px 0;
-            text-align: left;
-        }
-        .feature {
-            background: rgba(255, 255, 255, 0.15);
-            padding: 15px;
-            border-radius: 10px;
-        }
-        .feature-icon { font-size: 2em; margin-bottom: 10px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🎬 BeatAnimes</h1>
-        <p>Generate Permanent Streaming Links for Your Videos</p>
-        
-        <div class="stats">
-            <div class="stat-card">
-                <div class="stat-number">${ANALYTICS.totalUsers}</div>
-                <div class="stat-label">Users</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-number">${ANALYTICS.totalFiles}</div>
-                <div class="stat-label">Files</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-number">${ANALYTICS.totalViews}</div>
-                <div class="stat-label">Views</div>
-            </div>
-        </div>
-        
-        <div class="features">
-            <div class="feature">
-                <div class="feature-icon">🔗</div>
-                <strong>Permanent Links</strong>
-                <p style="opacity: 0.8; margin-top: 5px;">Links that never expire</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">⚡</div>
-                <strong>Fast Streaming</strong>
-                <p style="opacity: 0.8; margin-top: 5px;">Lightning fast delivery</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">📊</div>
-                <strong>Analytics</strong>
-                <p style="opacity: 0.8; margin-top: 5px;">Track your views</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🔒</div>
-                <strong>Secure</strong>
-                <p style="opacity: 0.8; margin-top: 5px;">Safe and reliable</p>
-            </div>
-        </div>
-        
-        <a href="https://t.me/${BOT_USERNAME}" class="btn">Start Using Bot 🚀</a>
-        
-        <p style="margin-top: 30px; opacity: 0.7; font-size: 0.9em;">
-            Join ${CHANNEL_USERNAME} for updates
-        </p>
-    </div>
-</body>
-</html>
-    `);
-});
-
-app.get('/ping', (req, res) => {
-    res.json({
-        status: 'ok',
-        uptime: process.uptime(),
-        files: FILE_DATABASE.size,
-        users: USER_DATABASE.size,
-        views: ANALYTICS.totalViews,
-        downloads: ANALYTICS.totalDownloads
-    });
+    res.send(`<h1>BeatAnimes Link Generator Bot</h1><p>Bot is running. Start a conversation on Telegram.</p><p>Total Users: ${USER_DATABASE.size} | Total Files: ${FILE_DATABASE.size}</p>`);
 });
 
 app.get('/stream/:id', async (req, res) => {
-    const fileId = req.params.id;
-    const fileData = findFile(fileId);
-    
-    if (!fileData || !isFilePermanent(fileData.uniqueId)) { 
-        return res.status(404).send('File not found or has expired.');
+    const id = req.params.id;
+    const fileData = findFile(id);
+
+    if (!fileData || !isFilePermanent(fileData.uniqueId)) {
+        return res.status(404).send('File not found or has expired. Upgrade to Premium for permanent links.');
     }
-    
+
     try {
-        fileData.views++;
-        fileData.lastAccessed = Date.now();
-        ANALYTICS.totalViews++;
-        
         const fileUrl = await getFreshFileUrl(fileData);
         const range = req.headers.range;
         
         if (range) {
-            const response = await fetch(fileUrl, { headers: { 'Range': range } });
-            if (!response.ok) throw new Error('Failed to fetch');
+            const parts = range.replace(/bytes=/, '').split('-');
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileData.fileSize - 1;
+            const contentLength = (end - start) + 1;
             
-            res.status(206);
-            res.setHeader('Content-Type', 'video/mp4');
-            res.setHeader('Content-Range', response.headers.get('content-range'));
-            res.setHeader('Content-Length', response.headers.get('content-length'));
-            res.setHeader('Accept-Ranges', 'bytes');
-            res.setHeader('Cache-Control', 'public, max-age=3600');
+            const headers = {
+                'Content-Range': `bytes ${start}-${end}/${fileData.fileSize}`,
+                'Accept-Ranges': 'bytes',
+                'Content-Length': contentLength,
+                'Content-Type': 'video/mp4' 
+            };
             
-            response.body.pipe(res);
+            const fetchOptions = { headers: { Range: `bytes=${start}-${end}` } };
+            const fileResponse = await fetch(fileUrl, fetchOptions);
+
+            res.writeHead(206, headers);
+            fileResponse.body.pipe(res);
+
         } else {
-            const response = await fetch(fileUrl);
-            if (!response.ok) throw new Error('Failed to fetch');
+            const headers = {
+                'Content-Length': fileData.fileSize,
+                'Content-Type': 'video/mp4',
+                'Accept-Ranges': 'bytes'
+            };
             
-            res.setHeader('Content-Type', 'video/mp4');
-            res.setHeader('Content-Disposition', `inline; filename="${fileData.fileName}"`);
-            res.setHeader('Accept-Ranges', 'bytes');
-            res.setHeader('Content-Length', fileData.fileSize);
-            res.setHeader('Cache-Control', 'public, max-age=3600');
-            
-            response.body.pipe(res);
+            const fileResponse = await fetch(fileUrl);
+            res.writeHead(200, headers);
+            fileResponse.body.pipe(res);
         }
-        
+
+        fileData.views++;
+        fileData.lastAccessed = Date.now();
+        ANALYTICS.totalViews++;
+
     } catch (error) {
-        res.status(500).send('Error streaming file');
+        console.error('❌ Streaming Error:', error.message);
+        res.status(500).send('Streaming failed: Could not retrieve file from Telegram.');
     }
 });
 
 app.get('/download/:id', async (req, res) => {
-    const fileId = req.params.id;
-    const fileData = findFile(fileId);
-    
-    if (!fileData || !isFilePermanent(fileData.uniqueId)) { 
-        return res.status(404).send('File not found or has expired.');
+    const id = req.params.id;
+    const fileData = findFile(id);
+
+    if (!fileData || !isFilePermanent(fileData.uniqueId)) {
+        return res.status(404).send('File not found or has expired. Upgrade to Premium for permanent links.');
     }
-    
+
     try {
+        const fileUrl = await getFreshFileUrl(fileData);
+        const fileResponse = await fetch(fileUrl);
+        
+        res.setHeader('Content-Disposition', `attachment; filename="${fileData.fileName}"`);
+        res.setHeader('Content-Type', fileResponse.headers.get('content-type') || 'application/octet-stream');
+        res.setHeader('Content-Length', fileData.fileSize);
+        
+        fileResponse.body.pipe(res);
+
         fileData.downloads++;
         fileData.lastAccessed = Date.now();
         ANALYTICS.totalDownloads++;
-        
-        const fileUrl = await getFreshFileUrl(fileData);
-        
-        const response = await fetch(fileUrl);
-        
-        if (!response.ok) {
-            throw new Error('Failed to fetch file from Telegram');
-        }
-        
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Content-Disposition', `attachment; filename="${fileData.fileName}"`);
-        res.setHeader('Content-Length', fileData.fileSize);
-        
-        response.body.pipe(res);
-        
+
     } catch (error) {
-        res.status(500).send('Error downloading file');
+        console.error('❌ Download Error:', error.message);
+        res.status(500).send('Download failed: Could not retrieve file from Telegram.');
     }
 });
 
+
+// ============================================
+// START SERVER AND MAINTENANCE LOOP
+// ============================================
+
+setInterval(() => {
+    const result = runMaintenanceJob();
+    if (result.cleanedFiles > 0 || result.cleanedCache > 0) {
+        console.log(`🧹 Scheduled Maintenance: Cleaned ${result.cleanedFiles} expired files and ${result.cleanedCache} cache entries.`);
+    }
+}, 4 * 60 * 60 * 1000); // Run every 4 hours
 
 app.listen(PORT, () => {
     console.log('═══════════════════════════════════════');
@@ -1027,6 +1035,7 @@ app.listen(PORT, () => {
     console.log('═══════════════════════════════════════');
 });
 
+// Graceful shutdown
 process.on('SIGINT', () => {
     console.log('\n⏸️ Shutting down...');
     if (BROADCAST_STATUS.jobInterval) clearInterval(BROADCAST_STATUS.jobInterval);
