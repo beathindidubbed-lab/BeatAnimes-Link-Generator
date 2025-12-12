@@ -190,142 +190,6 @@ Join our channel: ${CHANNEL_USERNAME}
     
     if (WELCOME_PHOTO_ID) {
         try {
-        fileData.downloads++;
-        ANALYTICS.totalDownloads++;
-        
-        const fileUrl = await getFreshFileUrl(fileData);
-        const response = await fetch(fileUrl);
-        
-        if (!response.ok) throw new Error('Failed to fetch');
-        
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Content-Disposition', `attachment; filename="${fileData.fileName}"`);
-        res.setHeader('Content-Length', fileData.fileSize);
-        
-        response.body.pipe(res);
-        
-        console.log(`⬇️ Download: ${fileData.fileName}`);
-    } catch (error) {
-        console.error('❌ Download error:', error);
-        res.status(500).send('Error downloading file');
-    }
-};
-
-// API endpoints
-app.get('/api/stats', (req, res) => {
-    res.json({
-        users: USER_DATABASE.size,
-        files: FILE_DATABASE.size,
-        views: ANALYTICS.totalViews,
-        downloads: ANALYTICS.totalDownloads,
-        uptime: process.uptime()
-    });
-});
-
-app.get('/api/file/:id', (req, res) => {
-    const fileData = FILE_DATABASE.get(req.params.id);
-    if (!fileData) return res.status(404).json({ error: 'File not found' });
-    
-    res.json({
-        id: req.params.id,
-        fileName: fileData.fileName,
-        fileSize: formatFileSize(fileData.fileSize),
-        views: fileData.views,
-        downloads: fileData.downloads,
-        uploadedBy: fileData.uploaderName,
-        createdAt: fileData.createdAt
-    });
-});
-
-// ============================================
-// UTILITY FUNCTIONS
-// ============================================
-
-function generateUniqueId() {
-    return Math.random().toString(36).substring(2, 15) + 
-           Math.random().toString(36).substring(2, 15);
-}
-
-function formatFileSize(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
-}
-
-function formatUptime(seconds) {
-    const days = Math.floor(seconds / 86400);
-    const hours = Math.floor((seconds % 86400) / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    if (days > 0) return `${days}d ${hours}h`;
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    return `${minutes}m`;
-}
-
-function formatDate(timestamp) {
-    const date = new Date(timestamp);
-    return date.toLocaleDateString('en-US', { 
-        month: 'short', 
-        day: 'numeric',
-        year: 'numeric'
-    });
-}
-
-function getTopFiles(limit = 5) {
-    const sorted = Array.from(FILE_DATABASE.entries())
-        .sort((a, b) => b[1].views - a[1].views)
-        .slice(0, limit);
-    
-    let result = '';
-    sorted.forEach(([id, file], i) => {
-        result += `${i + 1}. ${file.fileName} - ${file.views} views\n`;
-    });
-    
-    return result || 'No files yet';
-}
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// ============================================
-// START SERVER
-// ============================================
-app.listen(PORT, () => {
-    console.log('═══════════════════════════════════════');
-    console.log('🎬 BeatAnimes Link Generator Bot');
-    console.log('═══════════════════════════════════════');
-    console.log(`✅ Server running on port ${PORT}`);
-    console.log(`📡 URL: ${WEBAPP_URL}`);
-    console.log(`👑 Admins: ${ADMIN_IDS.length}`);
-    console.log(`🤖 Bot is ready!`);
-    console.log('═══════════════════════════════════════');
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('\n⏸️ Shutting down...');
-    bot.stopPolling();
-    process.exit(0);
-});
-
-// Clean up expired cache every hour
-setInterval(() => {
-    const now = Date.now();
-    let cleaned = 0;
-    
-    for (const [key, value] of URL_CACHE.entries()) {
-        if (now - value.timestamp > URL_CACHE_DURATION) {
-            URL_CACHE.delete(key);
-            cleaned++;
-        }
-    }
-    
-    if (cleaned > 0) {
-        console.log(`🧹 Cleaned ${cleaned} expired cache entries`);
-    }
-}, 60 * 60 * 1000) {
             await bot.sendPhoto(chatId, WELCOME_PHOTO_ID, {
                 caption: welcomeText,
                 parse_mode: 'HTML',
@@ -572,11 +436,88 @@ ${getTopFiles(5)}
         
         // Back to Start
         else if (data === 'start') {
-            bot.onText(/\/start/, async (msg) => {
-                // Trigger start command
-            });
             await bot.deleteMessage(chatId, messageId);
-            bot.emit('message', { ...query.message, text: '/start', from: query.from, chat: { id: chatId } });
+            // Simulate the /start command by emitting a message event
+            bot.emit('message', { 
+                ...query.message, 
+                text: '/start', 
+                from: query.from, 
+                chat: { id: chatId } 
+            });
+        }
+        
+        // File Details
+        else if (data.startsWith('file_')) {
+            const fileId = data.substring(5);
+            const fileData = FILE_DATABASE.get(fileId);
+            
+            if (!fileData) {
+                return bot.answerCallbackQuery(query.id, {
+                    text: '❌ File not found in database!',
+                    show_alert: true
+                });
+            }
+            
+            const fileText = `
+📁 <b>File Details</b>
+
+<b>Name:</b> ${fileData.fileName}
+<b>Size:</b> ${formatFileSize(fileData.fileSize)}
+<b>ID:</b> <code>${fileId}</code>
+<b>Uploaded:</b> ${formatDate(fileData.createdAt)}
+<b>Views:</b> ${fileData.views}
+<b>Downloads:</b> ${fileData.downloads}
+
+Choose an action:
+            `;
+            
+            await bot.editMessageText(fileText, {
+                chat_id: chatId,
+                message_id: messageId,
+                parse_mode: 'HTML',
+                reply_markup: getFileActionsKeyboard(fileId)
+            });
+        }
+
+        // Get Link
+        else if (data.startsWith('get_link_')) {
+            const fileId = data.substring(9);
+            const streamLink = `${WEBAPP_URL}/stream/${fileId}`;
+
+            await bot.answerCallbackQuery(query.id, {
+                text: `🔗 Streaming Link: ${streamLink}`,
+                show_alert: true
+            });
+        }
+
+        // File Stats (from button on file page)
+        else if (data.startsWith('file_stats_')) {
+            const fileId = data.substring(11);
+            const fileData = FILE_DATABASE.get(fileId);
+            
+            if (!fileData) {
+                return bot.answerCallbackQuery(query.id, {
+                    text: '❌ File not found in database!',
+                    show_alert: true
+                });
+            }
+
+            await bot.answerCallbackQuery(query.id, {
+                text: `📊 Stats for ${fileData.fileName}:\n👁️ Views: ${fileData.views}\n⬇️ Downloads: ${fileData.downloads}`,
+                show_alert: true
+            });
+        }
+
+        // Delete File (Placeholder for admin/user functionality)
+        else if (data.startsWith('delete_file_')) {
+            // Implement delete logic here
+            const fileId = data.substring(12);
+            // FILE_DATABASE.delete(fileId);
+            
+            await bot.answerCallbackQuery(query.id, {
+                text: `🗑️ Delete functionality not implemented yet for file ${fileId}.`,
+                show_alert: true
+            });
         }
         
         await bot.answerCallbackQuery(query.id);
@@ -998,25 +939,21 @@ app.get('/download/:id', async (req, res) => {
     }
     
     try {
-        // Get file URL from Telegram
-        const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileData.filePath}`;
+        fileData.downloads++;
+        ANALYTICS.totalDownloads++;
         
-        console.log(`⬇️ Download: ${fileData.fileName}`);
-        
-        // Fetch file from Telegram
+        const fileUrl = await getFreshFileUrl(fileData);
         const response = await fetch(fileUrl);
         
-        if (!response.ok) {
-            throw new Error('Failed to fetch file from Telegram');
-        }
+        if (!response.ok) throw new Error('Failed to fetch');
         
-        // Set headers for download
         res.setHeader('Content-Type', 'application/octet-stream');
         res.setHeader('Content-Disposition', `attachment; filename="${fileData.fileName}"`);
+        res.setHeader('Content-Length', fileData.fileSize);
         
-        // Stream the file
         response.body.pipe(res);
         
+        console.log(`⬇️ Download: ${fileData.fileName}`);
     } catch (error) {
         console.error('❌ Download error:', error);
         res.status(500).send('Error downloading file');
@@ -1039,7 +976,7 @@ app.get('/api/file/:id', (req, res) => {
         views: fileData.views,
         createdAt: fileData.createdAt,
         streamUrl: `${WEBAPP_URL}/stream/${fileId}`,
-        downloadUrl: `${WEBAPP_URL}/download/${fileId}`
+        downloadUrl: `${WEBAPP_APP_URL}/download/${fileId}`
     });
 });
 
@@ -1080,18 +1017,75 @@ function formatFileSize(bytes) {
     return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
 }
 
+function formatUptime(seconds) {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    if (days > 0) return `${days}d ${hours}h`;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+}
+
+function formatDate(timestamp) {
+    const date = new Date(timestamp);
+    return date.toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric',
+        year: 'numeric'
+    });
+}
+
+function getTopFiles(limit = 5) {
+    const sorted = Array.from(FILE_DATABASE.entries())
+        .sort((a, b) => b[1].views - a[1].views)
+        .slice(0, limit);
+    
+    let result = '';
+    sorted.forEach(([id, file], i) => {
+        result += `${i + 1}. ${file.fileName} - ${file.views} views\n`;
+    });
+    
+    return result || 'No files yet';
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // ============================================
 // START SERVER
 // ============================================
 app.listen(PORT, () => {
+    console.log('═══════════════════════════════════════');
+    console.log('🎬 BeatAnimes Link Generator Bot');
+    console.log('═══════════════════════════════════════');
     console.log(`✅ Server running on port ${PORT}`);
-    console.log(`📡 Webhook URL: ${WEBAPP_URL}`);
-    console.log(`🤖 Bot is ready to generate links!`);
+    console.log(`📡 URL: ${WEBAPP_URL}`);
+    console.log(`👑 Admins: ${ADMIN_IDS.length}`);
+    console.log(`🤖 Bot is ready!`);
+    console.log('═══════════════════════════════════════');
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-    console.log('\n⏸️ Shutting down gracefully...');
+    console.log('\n⏸️ Shutting down...');
     bot.stopPolling();
     process.exit(0);
 });
+
+// Clean up expired cache every hour
+setInterval(() => {
+    const now = Date.now();
+    let cleaned = 0;
+    
+    for (const [key, value] of URL_CACHE.entries()) {
+        if (now - value.timestamp > URL_CACHE_DURATION) {
+            URL_CACHE.delete(key);
+            cleaned++;
+        }
+    }
+    
+    if (cleaned > 0) {
+        console.log(`🧹 Cleaned ${cleaned} expired cache entries`);
+    }
+}, 60 * 60 * 1000);
