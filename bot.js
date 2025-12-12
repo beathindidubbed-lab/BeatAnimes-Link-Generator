@@ -1,6 +1,7 @@
 // ============================================
 // ULTIMATE TELEGRAM PERMANENT LINK BOT (V2)
 // Improvements: Multi-Channel Force Sub, Verify Subscription Flow.
+// Feature: Universal Small Caps Text Style
 // ============================================
 
 import TelegramBot from 'node-telegram-bot-api';
@@ -109,6 +110,20 @@ bot.setMyCommands([
 // ============================================
 // UTILITY FUNCTIONS & CORE LOGIC
 // ============================================
+
+/**
+ * Converts text to a Small Caps style using Unicode characters.
+ */
+function toSmallCaps(text) {
+    const map = {
+        'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ғ', 'g': 'ɢ', 'h': 'ʜ', 'i': 'ɪ',
+        'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ', 'm': 'ᴍ', 'n': 'ɴ', 'o': 'ᴏ', 'p': 'ᴘ', 'q': 'ǫ', 'r': 'ʀ',
+        's': 's', 't': 'ᴛ', 'u': 'ᴜ', 'v': 'ᴠ', 'w': 'ᴡ', 'x': 'x', 'y': 'ʏ', 'z': 'ᴢ',
+        ' ': ' ' // preserve spaces
+    };
+    return text.toLowerCase().split('').map(char => map[char] || char).join('');
+}
+
 
 function isAdmin(userId) {
     return ADMIN_IDS.includes(userId);
@@ -315,11 +330,11 @@ function getForceJoinKeyboard(requiredChannels) {
     for (const ch of requiredChannels) {
         // Use a direct Telegram link for the button
         const url = ch.username ? `https://t.me/${ch.username.replace('@', '')}` : 'https://t.me/telegram'; // Fallback to Telegram link for private
-        keyboard.push([{ text: `📢 ${ch.title}`, url: url }]);
+        keyboard.push([{ text: `📢 ${toSmallCaps(ch.title)}`, url: url }]);
     }
     
     // The verify button uses the callback_data="verify_subscription"
-    keyboard.push([{ text: '✅ Click to continue', callback_data: 'verify_subscription' }]);
+    keyboard.push([{ text: toSmallCaps('✅ Click to continue'), callback_data: 'verify_subscription' }]);
     
     return { inline_keyboard: keyboard };
 }
@@ -348,11 +363,11 @@ async function forceSubCheckAndIntercept(msg, action) {
     } else {
         // Intercept: User is NOT a member, send prompt
         const promptText = `
-⚠️ <b>ACCESS DENIED - Join Required</b>
+⚠️ <b>${toSmallCaps('ACCESS DENIED - Join Required')}</b>
 
-Hello ${msg.from.first_name}, to use this bot's powerful features, you must first join all of our mandatory channels listed below.
+${toSmallCaps('Hello')} ${msg.from.first_name}, ${toSmallCaps('to use this bot\'s powerful features, you must first join all of our mandatory channels listed below.')}
 
-Please join **ALL** channels and then click the 'Click to continue' button.
+${toSmallCaps('Please join')} **${toSmallCaps('ALL')}** ${toSmallCaps('channels and then click the')} '${toSmallCaps('Click to continue')}' ${toSmallCaps('button.')}
         `;
         
         // Delete original message if it's a file upload/command to prevent processing
@@ -373,24 +388,22 @@ Please join **ALL** channels and then click the 'Click to continue' button.
 // KEYBOARD & TEXT GENERATION
 // ============================================
 
-// Removed getForceJoinKeyboard as it is now getForceJoinKeyboard(requiredChannels)
-
 // **NEW** Custom Welcome Keyboard (Replaces the default welcome message UI)
 function getCustomWelcomeKeyboard(isAdminUser) {
     // Add "Go to Bot Features" button to access /stats, /files, etc.
     let keyboard = [
-        [{ text: "ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url: PUBLIC_ANIME_CHANNEL_URL }],
-        [{ text: "ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ", url: `https://t.me/${ADMIN_CONTACT_USERNAME}` }],
-        [{ text: "ʀᴇǫᴜᴇsᴛ ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url: REQUEST_CHANNEL_URL }],
+        [{ text: toSmallCaps("ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ"), url: PUBLIC_ANIME_CHANNEL_URL }],
+        [{ text: toSmallCaps("ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ"), url: `https://t.me/${ADMIN_CONTACT_USERNAME}` }],
+        [{ text: toSmallCaps("ʀᴇǫᴜᴇsᴛ ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ"), url: REQUEST_CHANNEL_URL }],
         [
-            { text: "ᴀʙᴏᴜᴛ ᴍᴇ", callback_data: "about_bot" },
-            { text: "ᴄʟᴏsᴇ", callback_data: "close_message" }
+            { text: toSmallCaps("ᴀʙᴏᴜᴛ ᴍᴇ"), callback_data: "about_bot" },
+            { text: toSmallCaps("ᴄʟᴏsᴇ"), callback_data: "close_message" }
         ],
-        [{ text: "➡️ Go to Bot Features", callback_data: "start_features" }]
+        [{ text: toSmallCaps("➡️ Go to Bot Features"), callback_data: "start_features" }]
     ];
 
     if (isAdminUser) {
-        keyboard.push([{ text: "👑 Admin Panel", callback_data: "admin_panel" }]);
+        keyboard.push([{ text: toSmallCaps("👑 Admin Panel"), callback_data: "admin_panel" }]);
     }
     
     return { inline_keyboard: keyboard };
@@ -401,26 +414,26 @@ function getMainKeyboard(isAdmin = false) {
     // This is the keyboard for the core bot features (stats, files, premium, etc.)
     const keyboard = [
         [
-            { text: '📊 My Stats', callback_data: 'my_stats' },
-            { text: '📁 My Files', callback_data: 'my_files_0' } 
+            { text: toSmallCaps('📊 My Stats'), callback_data: 'my_stats' },
+            { text: toSmallCaps('📁 My Files'), callback_data: 'my_files_0' } 
         ],
         [
-            { text: '💎 Upgrade Premium', callback_data: 'premium_info' }, 
-            { text: '👥 Referral Link', callback_data: 'referral_info' } 
+            { text: toSmallCaps('💎 Upgrade Premium'), callback_data: 'premium_info' }, 
+            { text: toSmallCaps('👥 Referral Link'), callback_data: 'referral_info' } 
         ],
         [
-            { text: '📖 Bot Help', callback_data: 'help' }
+            { text: toSmallCaps('📖 Bot Help'), callback_data: 'help' }
         ]
     ];
     
     if (isAdmin) {
         keyboard.push([
-            { text: '👑 Admin Panel', callback_data: 'admin_panel' }
+            { text: toSmallCaps('👑 Admin Panel'), callback_data: 'admin_panel' }
         ]);
     }
     
     // Add a back button to the custom welcome screen
-    keyboard.push([{ text: '🔙 Back to Welcome', callback_data: 'user_back' }]);
+    keyboard.push([{ text: toSmallCaps('🔙 Back to Welcome'), callback_data: 'user_back' }]);
     
     return { inline_keyboard: keyboard };
 }
@@ -428,23 +441,23 @@ function getMainKeyboard(isAdmin = false) {
 
 function getAdminKeyboard() {
     const isBroadcasting = BROADCAST_STATUS.isSending;
-    const broadcastText = isBroadcasting ? `⏳ Broadcast in Progress` : '📢 Universal Broadcast';
+    const broadcastText = isBroadcasting ? toSmallCaps(`⏳ Broadcast in Progress`) : toSmallCaps('📢 Universal Broadcast');
 
     return {
         inline_keyboard: [
             [
-                { text: '📊 Statistics', callback_data: 'admin_stats' },
-                { text: '👥 Manage Users', callback_data: 'admin_users_1' } 
+                { text: toSmallCaps('📊 Statistics'), callback_data: 'admin_stats' },
+                { text: toSmallCaps('👥 Manage Users'), callback_data: 'admin_users_1' } 
             ],
             [
                 { text: broadcastText, callback_data: isBroadcasting ? 'admin_stop_broadcast' : 'admin_broadcast_start' }, 
-                { text: '🧹 Cleanup Links/Cache', callback_data: 'admin_trigger_cleanup' }
+                { text: toSmallCaps('🧹 Cleanup Links/Cache'), callback_data: 'admin_trigger_cleanup' }
             ],
             [
-                { text: `🔗 Manage Join Channels (${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.length})`, callback_data: 'admin_list_channels' }
+                { text: toSmallCaps(`🔗 Manage Join Channels (${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.length})`), callback_data: 'admin_list_channels' }
             ],
             [
-                { text: '🔙 Back', callback_data: 'start_features' } // Back to Main Bot Features menu
+                { text: toSmallCaps('🔙 Back'), callback_data: 'start_features' } // Back to Main Bot Features menu
             ]
         ]
     };
@@ -452,7 +465,7 @@ function getAdminKeyboard() {
 
 function getFileActionsKeyboard(fileId, userType) {
     const file = FILE_DATABASE.get(fileId);
-    if (!file) return { inline_keyboard: [[{ text: '🔙 Back to Files', callback_data: 'my_files_0' }]] };
+    if (!file) return { inline_keyboard: [[{ text: toSmallCaps('🔙 Back to Files'), callback_data: 'my_files_0' }]] };
 
     const idOrAlias = file.customAlias || fileId;
     const streamLink = `${WEBAPP_URL}/stream/${idOrAlias}`;
@@ -462,12 +475,12 @@ function getFileActionsKeyboard(fileId, userType) {
     let statusRow = [];
     if (!isPermanent) {
         const remainingTime = formatRemainingTime(file.createdAt); 
-        statusRow.push({ text: `⚠️ Expires in ${remainingTime}`, callback_data: 'premium_info' });
+        statusRow.push({ text: toSmallCaps(`⚠️ Expires in ${remainingTime}`), callback_data: 'premium_info' });
     }
 
     const aliasButton = [];
     if (userType === 'PREMIUM' || userType === 'ADMIN') {
-        const alias = file.customAlias ? `🏷️ Alias: ${file.customAlias}` : '🏷️ Set Custom Alias';
+        const alias = file.customAlias ? toSmallCaps(`🏷️ Alias: ${file.customAlias}`) : toSmallCaps('🏷️ Set Custom Alias');
         aliasButton.push({ text: alias, callback_data: `alias_file_${fileId}` });
     }
 
@@ -475,19 +488,19 @@ function getFileActionsKeyboard(fileId, userType) {
         inline_keyboard: [
             statusRow.length > 0 ? statusRow : [], 
             [
-                { text: '🔗 Open Stream', url: streamLink },
-                { text: '⬇️ Download', url: downloadLink }
+                { text: toSmallCaps('🔗 Open Stream'), url: streamLink },
+                { text: toSmallCaps('⬇️ Download'), url: downloadLink }
             ],
             [
-                { text: '📊 Stats', callback_data: `file_stats_${fileId}` },
-                { text: '🗑️ Delete', callback_data: `delete_file_${fileId}` }
+                { text: toSmallCaps('📊 Stats'), callback_data: `file_stats_${fileId}` },
+                { text: toSmallCaps('🗑️ Delete'), callback_data: `delete_file_${fileId}` }
             ],
             [
-                { text: '📝 Rename', callback_data: `rename_file_${fileId}` }, 
+                { text: toSmallCaps('📝 Rename'), callback_data: `rename_file_${fileId}` }, 
                 ...aliasButton 
             ],
             [
-                { text: '🔙 Back to Files', callback_data: 'my_files_0' }
+                { text: toSmallCaps('🔙 Back to Files'), callback_data: 'my_files_0' }
             ]
         ].filter(row => row.length > 0)
     };
@@ -498,62 +511,62 @@ function getWelcomeText(userId, firstName) {
     const limitCheck = canGenerateLink(userId);
 
     return `
-🎬 <b>Welcome to BeatAnimes Link Generator!</b>
+🎬 <b>${toSmallCaps('Welcome to BeatAnimes Link Generator!')}</b>
 
-${firstName}, I'm here to help you create <b>permanent streaming links</b> for your videos! 🚀
+${firstName}, ${toSmallCaps('I\'m here to help you create')} <b>${toSmallCaps('permanent streaming links')}</b> ${toSmallCaps('for your videos!')} 🚀
 
-<b>✨ Your Current Plan: ${getUserType(userId)}</b>
-- Links ${limitCheck.userType === 'NORMAL' ? `expire after 30 days.` : 'NEVER expire (Permanent!).'}
-- Upload Limit: ${limitCheck.current} / ${limitCheck.limit} (Total limit includes ${user.referralBonus} bonus slots.)
+<b>✨ ${toSmallCaps('Your Current Plan')}: ${getUserType(userId)}</b>
+- ${toSmallCaps('Links')} ${limitCheck.userType === 'NORMAL' ? toSmallCaps(`expire after 30 days.`) : toSmallCaps('NEVER expire (Permanent!).')}
+- ${toSmallCaps('Upload Limit')}: ${limitCheck.current} / ${limitCheck.limit} (${toSmallCaps('Total limit includes')} ${user.referralBonus} ${toSmallCaps('bonus slots.')})
 
-<b>🎯 Quick Start:</b> Just send me any video file!
+<b>🎯 ${toSmallCaps('Quick Start')}:</b> ${toSmallCaps('Just send me any video file!')}
 
-<b>👥 Users:</b> ${ANALYTICS.totalUsers}
-<b>📁 Files:</b> ${ANALYTICS.totalFiles}
+<b>👥 ${toSmallCaps('Users')}:</b> ${ANALYTICS.totalUsers}
+<b>📁 ${toSmallCaps('Files')}:</b> ${ANALYTICS.totalFiles}
     `;
 }
 
 function getHelpText() {
     return `
-📚 <b>Bot Help Guide</b>
+📚 <b>${toSmallCaps('Bot Help Guide')}</b>
 
-<b>1. How to use:</b>
-- Simply send me any video or document file. I will generate a permanent streaming/download link for it instantly.
+<b>1. ${toSmallCaps('How to use')}:</b>
+- ${toSmallCaps('Simply send me any video or document file. I will generate a permanent streaming/download link for it instantly.')}
 
-<b>2. File Limits & Expiration:</b>
-- **NORMAL (Free Tier):** You can upload ${LINK_LIMITS.NORMAL} files. Links expire after 30 days.
-- **PREMIUM:** You can upload ${LINK_LIMITS.PREMIUM} files. Links are **PERMANENT**.
+<b>2. ${toSmallCaps('File Limits & Expiration')}:</b>
+- **${toSmallCaps('NORMAL (Free Tier)')}:** ${toSmallCaps('You can upload')} ${LINK_LIMITS.NORMAL} ${toSmallCaps('files. Links expire after 30 days.')}
+- **${toSmallCaps('PREMIUM')}:** ${toSmallCaps('You can upload')} ${LINK_LIMITS.PREMIUM} ${toSmallCaps('files. Links are')} **${toSmallCaps('PERMANENT')}**.
 
-<b>3. Commands:</b>
-- /start: Open custom welcome.
-- /help: Show bot guide.
-- /stats: Check limits, usage.
-- /files: Manage uploaded links.
-- /premium or /upgrade: See upgrade details.
-- /referral: Get referral link.
-- /admin: Open admin panel ...[ADMIN]
-- /broadcast: Start mass message ...[ADMIN]
-- /addchannel: Add force sub channel ...[ADMIN]
+<b>3. ${toSmallCaps('Commands')}:</b>
+- /start: ${toSmallCaps('Open custom welcome.')}
+- /help: ${toSmallCaps('Show bot guide.')}
+- /stats: ${toSmallCaps('Check limits, usage.')}
+- /files: ${toSmallCaps('Manage uploaded links.')}
+- /premium ${toSmallCaps('or')} /upgrade: ${toSmallCaps('See upgrade details.')}
+- /referral: ${toSmallCaps('Get referral link.')}
+- /admin: ${toSmallCaps('Open admin panel')} ...[ADMIN]
+- /broadcast: ${toSmallCaps('Start mass message')} ...[ADMIN]
+- /addchannel: ${toSmallCaps('Add force sub channel')} ...[ADMIN]
 
-<b>4. Important:</b>
-- You must remain a member of all mandatory channels to use the bot.
+<b>4. ${toSmallCaps('Important')}:</b>
+- ${toSmallCaps('You must remain a member of all mandatory channels to use the bot.')}
     `;
 }
 
 function getPremiumText() {
     return `
-💎 <b>Upgrade to Premium</b>
+💎 <b>${toSmallCaps('Upgrade to Premium')}</b>
 
-Enjoy the ultimate experience with Premium:
+${toSmallCaps('Enjoy the ultimate experience with Premium')}:
 
-1.  <b>PERMANENT LINKS:</b> Your links will **NEVER** expire.
-2.  <b>HIGH LIMIT:</b> Upload up to **${LINK_LIMITS.PREMIUM}** files.
-3.  <b>CUSTOM ALIASES:</b> Set short, memorable URL slugs for your links.
+1.  <b>${toSmallCaps('PERMANENT LINKS')}:</b> ${toSmallCaps('Your links will')} **${toSmallCaps('NEVER')}** ${toSmallCaps('expire.')}
+2.  <b>${toSmallCaps('HIGH LIMIT')}:</b> ${toSmallCaps('Upload up to')} **${LINK_LIMITS.PREMIUM}** ${toSmallCaps('files.')}
+3.  <b>${toSmallCaps('CUSTOM ALIASES')}:</b> ${toSmallCaps('Set short, memorable URL slugs for your links.')}
 
-💰 <b>How to Upgrade:</b>
-Contact our support team @${ADMIN_CONTACT_USERNAME} to purchase the premium plan!
+💰 <b>${toSmallCaps('How to Upgrade')}:</b>
+${toSmallCaps('Contact our support team')} @${ADMIN_CONTACT_USERNAME} ${toSmallCaps('to purchase the premium plan!')}
 
-Thank you for supporting the bot!
+${toSmallCaps('Thank you for supporting the bot!')}
     `;
 }
 
@@ -561,27 +574,27 @@ function getReferralText(userId) {
     const user = USER_DATABASE.get(userId);
     const referralLink = `${WEBAPP_URL}?start=${userId}`;
     return `
-👥 <b>Referral Program</b>
+👥 <b>${toSmallCaps('Referral Program')}</b>
 
-Invite friends and earn free link slots!
+${toSmallCaps('Invite friends and earn free link slots!')}
 
-- **Reward:** You get **+1 permanent link slot** for every new user who starts the bot using your unique link.
-- **Current Bonus Slots:** ${user.referralBonus || 0}
+- **${toSmallCaps('Reward')}:** ${toSmallCaps('You get')} **${toSmallCaps('+1 permanent link slot')}** ${toSmallCaps('for every new user who starts the bot using your unique link.')}
+- **${toSmallCaps('Current Bonus Slots')}:** ${user.referralBonus || 0}
 
-🔗 <b>Your Unique Referral Link:</b>
+🔗 <b>${toSmallCaps('Your Unique Referral Link')}:</b>
 <code>${referralLink}</code>
 
-Share this link everywhere!
+${toSmallCaps('Share this link everywhere!')}
     `;
 }
 
 // **NEW** About Bot Text
 function getAboutText() {
     return `
-<b>About Us</b>
+<b>${toSmallCaps('About Us')}</b>
 
-Developed by @${ADMIN_CONTACT_USERNAME}
-This bot is designed to create permanent streaming and download links for media files shared on Telegram.
+${toSmallCaps('Developed by')} @${ADMIN_CONTACT_USERNAME}
+${toSmallCaps('This bot is designed to create permanent streaming and download links for media files shared on Telegram.')}
 `;
 }
 
@@ -611,7 +624,7 @@ function runMaintenanceJob() {
 
             cleanedFiles++;
 
-            bot.sendMessage(file.uploadedBy, `🗑️ **Your file has expired!**\n\nThe link for **${file.fileName}** has been removed after 30 days. Your link slot has been reclaimed.`, {
+            bot.sendMessage(file.uploadedBy, `${toSmallCaps('🗑️ Your file has expired!')}\n\n${toSmallCaps('The link for')} **${file.fileName}** ${toSmallCaps('has been removed after 30 days. Your link slot has been reclaimed.')}`, {
                 parse_mode: 'Markdown'
             }).catch(() => {});
         }
@@ -643,14 +656,14 @@ function startBroadcastJob(chatId, sourceMessageId, keyboard) {
 
     const totalUsers = BROADCAST_STATUS.queue.length;
     
-    bot.sendMessage(chatId, `🚀 **Broadcast started!**\n\nTargeting ${totalUsers} non-admin users. Progress will update automatically.`, { parse_mode: 'Markdown' });
+    bot.sendMessage(chatId, `${toSmallCaps('🚀 Broadcast started!')}\n\n${toSmallCaps('Targeting')} ${totalUsers} ${toSmallCaps('non-admin users. Progress will update automatically.')}`, { parse_mode: 'Markdown' });
 
     const intervalHandler = setInterval(async () => {
         if (BROADCAST_STATUS.queue.length === 0) {
             clearInterval(BROADCAST_STATUS.jobInterval);
             BROADCAST_STATUS.isSending = false;
             
-            bot.sendMessage(chatId, `✅ **Broadcast Complete!**\n\nTotal Users: ${totalUsers}\nSent: ${BROADCAST_STATUS.sentCount}\nFailed: ${BROADCAST_STATUS.failedCount}`, { parse_mode: 'Markdown' });
+            bot.sendMessage(chatId, `${toSmallCaps('✅ Broadcast Complete!')}\n\n${toSmallCaps('Total Users')}: ${totalUsers}\n${toSmallCaps('Sent')}: ${BROADCAST_STATUS.sentCount}\n${toSmallCaps('Failed')}: ${BROADCAST_STATUS.failedCount}`, { parse_mode: 'Markdown' });
             return;
         }
 
@@ -696,12 +709,12 @@ const handleStartCommand = async (msg, match) => {
          const referrer = USER_DATABASE.get(referrerId);
          if (referrer) {
              referrer.referralBonus = (referrer.referralBonus || 0) + 1; 
-             bot.sendMessage(referrerId, `🎁 You earned **1 FREE link slot**! **${firstName}** joined using your link.`, { parse_mode: 'Markdown' }).catch(() => {});
+             bot.sendMessage(referrerId, `${toSmallCaps('🎁 You earned')} **${toSmallCaps('1 FREE link slot')}**! **${firstName}** ${toSmallCaps('joined using your link.')}`, { parse_mode: 'Markdown' }).catch(() => {});
          }
     }
     
     if (user.isBlocked) {
-         return bot.sendMessage(msg.chat.id, '❌ You have been **BLOCKED**...', { parse_mode: 'Markdown' });
+         return bot.sendMessage(msg.chat.id, `${toSmallCaps('❌ You have been')} **${toSmallCaps('BLOCKED')}**...`, { parse_mode: 'Markdown' });
     }
     
     // --- FORCE SUB CHECK AND INTERCEPT ---
@@ -721,7 +734,7 @@ const handleStartCommand = async (msg, match) => {
         } catch (error) {
             // Handle failure by sending a fallback text message
             console.error(`Error copying welcome message: ${error.message}`);
-            const fallback_text = `👋 <b>Welcome to the bot!</b>\n\nUse the buttons below to navigate or send me a file to get started.`;
+            const fallback_text = `👋 <b>${toSmallCaps('Welcome to the bot!')}</b>\n\n${toSmallCaps('Use the buttons below to navigate or send me a file to get started.')}`;
             await bot.sendMessage(chatId, fallback_text, { 
                 parse_mode: 'HTML', 
                 reply_markup: customKeyboard 
@@ -753,13 +766,13 @@ bot.onText(/\/(help|stats|files|admin|premium|upgrade|referral|broadcast|cleanup
         }
         if (command === 'addchannel') {
             USER_STATE.set(userId, { state: 'ADDING_JOIN_CHANNEL' });
-            return bot.sendMessage(chatId, '🔗 **Add Mandatory Join Channel**\n\nSend the new Channel ID (e.g., `-100XXXXXXXXXX`) or Channel Username (e.g., `@mychannel`).', { parse_mode: 'Markdown' });
+            return bot.sendMessage(chatId, `${toSmallCaps('🔗 Add Mandatory Join Channel')}\n\n${toSmallCaps('Send the new Channel ID (e.g.,')} \`-100XXXXXXXXXX\` ${toSmallCaps(') or Channel Username (e.g.,')} \`@mychannel\`).`, { parse_mode: 'Markdown' });
         }
         if (command === 'listchannels') {
             return bot.emit('callback_query', { message: msg, from: msg.from, data: 'admin_list_channels', id: 'cmd_listchannel' + Date.now(), chat_instance: 'dummy' });
         }
     } else if (['admin', 'broadcast', 'cleanup', 'addchannel', 'listchannels'].includes(command) && !isAdmin(userId)) {
-        return bot.sendMessage(chatId, '❌ You are not authorized to use this command.', { parse_mode: 'Markdown' });
+        return bot.sendMessage(chatId, toSmallCaps('❌ You are not authorized to use this command.'), { parse_mode: 'Markdown' });
     }
 
     // --- PROTECTED USER COMMANDS ---
@@ -768,7 +781,7 @@ bot.onText(/\/(help|stats|files|admin|premium|upgrade|referral|broadcast|cleanup
         await bot.sendMessage(chatId, helpText, { 
             parse_mode: 'HTML',
             disable_web_page_preview: true,
-            reply_markup: { inline_keyboard: [[{ text: '🔙 Back to Welcome', callback_data: 'user_back' }]] }
+            reply_markup: { inline_keyboard: [[{ text: toSmallCaps('🔙 Back to Welcome'), callback_data: 'user_back' }]] }
         });
         return;
     }
@@ -818,7 +831,7 @@ bot.on('callback_query', async (query) => {
     const user = USER_DATABASE.get(userId) || registerUser(userId, query.from.username, query.from.first_name);
 
     if (user.isBlocked) { 
-        return bot.answerCallbackQuery(query.id, { text: '❌ You are blocked from using the bot.', show_alert: true }); 
+        return bot.answerCallbackQuery(query.id, { text: toSmallCaps('❌ You are blocked from using the bot.'), show_alert: true }); 
     }
 
     // Function to edit the message
@@ -846,17 +859,17 @@ bot.on('callback_query', async (query) => {
             // Success! Delete old prompt and re-emit /start
             try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
             bot.emit('message', { ...query.message, text: '/start', from: query.from, chat: { id: chatId } });
-            return bot.answerCallbackQuery(query.id, { text: '✅ Access Granted! Welcome!', show_alert: true });
+            return bot.answerCallbackQuery(query.id, { text: toSmallCaps('✅ Access Granted! Welcome!'), show_alert: true });
         } else {
             // Still not a member, re-show the prompt with the keyboard
             const promptText = `
-⚠️ <b>ACCESS DENIED - Join Required</b>
+⚠️ <b>${toSmallCaps('ACCESS DENIED - Join Required')}</b>
 
-You are still not a member of all required channels. Please join **ALL** channels and then click the 'Click to continue' button.
+${toSmallCaps('You are still not a member of all required channels. Please join')} **${toSmallCaps('ALL')}** ${toSmallCaps('channels and then click the')} '${toSmallCaps('Click to continue')}' ${toSmallCaps('button.')}
             `;
             const keyboard = getForceJoinKeyboard(requiredChannels);
             await editMessage(promptText, keyboard); // Use edit to update the current message
-            return bot.answerCallbackQuery(query.id, { text: '⚠️ Please join all channels listed above.', show_alert: true });
+            return bot.answerCallbackQuery(query.id, { text: toSmallCaps('⚠️ Please join all channels listed above.'), show_alert: true });
         }
     }
 
@@ -864,7 +877,7 @@ You are still not a member of all required channels. Please join **ALL** channel
     // --- Global Membership Check for All Other Callbacks ---
     const { isMember } = await checkAllMemberships(userId);
     if (!isMember && !isAdmin(userId)) {
-        await bot.answerCallbackQuery(query.id, { text: '⚠️ You must join the channel(s) to view this menu.', show_alert: true });
+        await bot.answerCallbackQuery(query.id, { text: toSmallCaps('⚠️ You must join the channel(s) to view this menu.'), show_alert: true });
         // Don't proceed to handle other data if check fails
         return; 
     }
@@ -891,13 +904,13 @@ You are still not a member of all required channels. Please join **ALL** channel
         } catch (e) {
             console.warn(`Could not delete message: ${e.message}`);
         }
-        return bot.answerCallbackQuery(query.id, { text: 'Message closed.', show_alert: false });
+        return bot.answerCallbackQuery(query.id, { text: toSmallCaps('Message closed.'), show_alert: false });
     }
     
     // About Bot
     else if (data === 'about_bot') {
         const aboutText = getAboutText();
-        const keyboard = { inline_keyboard: [[{ text: "🔙 BACK", callback_data: "user_back" }]] };
+        const keyboard = { inline_keyboard: [[{ text: toSmallCaps("🔙 BACK"), callback_data: "user_back" }]] };
         
         try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
         await bot.sendMessage(chatId, aboutText, { 
@@ -913,24 +926,24 @@ You are still not a member of all required channels. Please join **ALL** channel
         const limitCheck = canGenerateLink(userId);
         const totalViews = Array.from(FILE_DATABASE.values()).filter(f => f.uploadedBy === userId).reduce((sum, f) => sum + f.views, 0);
         const statsText = `
-📊 <b>Your Statistics</b>
+📊 <b>${toSmallCaps('Your Statistics')}</b>
 
-✨ <b>Your Tier:</b> ${limitCheck.userType}
-📁 <b>Your Uploads:</b> ${limitCheck.current} / ${limitCheck.limit}
-➕ <b>Referral Bonus Slots:</b> ${user.referralBonus}
-📈 <b>Total Views on Your Files:</b> ${totalViews}
+✨ <b>${toSmallCaps('Your Tier')}:</b> ${limitCheck.userType}
+📁 <b>${toSmallCaps('Your Uploads')}:</b> ${limitCheck.current} / ${limitCheck.limit}
+➕ <b>${toSmallCaps('Referral Bonus Slots')}:</b> ${user.referralBonus}
+📈 <b>${toSmallCaps('Total Views on Your Files')}:</b> ${totalViews}
         `;
         await editMessage(statsText, {
-            inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]]
+            inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'start_features' }]]
         });
     }
     // ... (Other handlers like my_files_, premium_info, referral_info, file_ etc. remain the same) ...
     else if (data === 'premium_info') {
         const premiumText = getPremiumText();
-        await editMessage(premiumText, { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]] });
+        await editMessage(premiumText, { inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'start_features' }]] });
     } else if (data === 'referral_info') {
         const referralText = getReferralText(userId);
-        await editMessage(referralText, { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]] }, true);
+        await editMessage(referralText, { inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'start_features' }]] }, true);
     } 
     // --- My Files List (with Pagination) ---
     const PAGE_SIZE = 5;
@@ -941,8 +954,8 @@ You are still not a member of all required channels. Please join **ALL** channel
         const filesToShow = myFiles.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
         if (myFiles.length === 0) {
-            await editMessage('❌ You have not uploaded any files yet. Send me a video!', {
-                inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]]
+            await editMessage(toSmallCaps('❌ You have not uploaded any files yet. Send me a video!'), {
+                inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'start_features' }]]
             });
             return bot.answerCallbackQuery(query.id);
         }
@@ -950,13 +963,13 @@ You are still not a member of all required channels. Please join **ALL** channel
         const filesList = filesToShow.map((f, i) => `${(page * PAGE_SIZE) + i + 1}. ${f.fileName} (${formatFileSize(f.fileSize)})`).join('\n');
         
         const navigationRow = [];
-        if (page > 0) navigationRow.push({ text: '◀️ Prev', callback_data: `my_files_${page - 1}` });
-        if (page < totalPages - 1) navigationRow.push({ text: 'Next ▶️', callback_data: `my_files_${page + 1}` });
+        if (page > 0) navigationRow.push({ text: toSmallCaps('◀️ Prev'), callback_data: `my_files_${page - 1}` });
+        if (page < totalPages - 1) navigationRow.push({ text: toSmallCaps('Next ▶️'), callback_data: `my_files_${page + 1}` });
 
-        await editMessage(`📁 <b>Your Files</b> (Page ${page + 1} of ${totalPages})\n\n${filesList}`, {
+        await editMessage(`📁 <b>${toSmallCaps('Your Files')}</b> (${toSmallCaps('Page')} ${page + 1} ${toSmallCaps('of')} ${totalPages})\n\n${filesList}`, {
             inline_keyboard: filesToShow.map(f => ([{ text: f.fileName, callback_data: `file_${f.uniqueId}` }]))
                 .concat([navigationRow])
-                .concat([[ { text: '🔙 Back', callback_data: 'start_features' } ]])
+                .concat([[ { text: toSmallCaps('🔙 Back'), callback_data: 'start_features' } ]])
         });
     }
     
@@ -967,28 +980,28 @@ You are still not a member of all required channels. Please join **ALL** channel
         if (!file || file.uploadedBy !== userId) return; 
         
         const fileText = `
-📁 <b>File Details:</b>
-Name: ${file.fileName}
-Size: ${formatFileSize(file.fileSize)}
-Alias: ${file.customAlias || 'None'}
-Views: ${file.views} | Downloads: ${file.downloads}
+📁 <b>${toSmallCaps('File Details')}:</b>
+${toSmallCaps('Name')}: ${file.fileName}
+${toSmallCaps('Size')}: ${formatFileSize(file.fileSize)}
+${toSmallCaps('Alias')}: ${file.customAlias || toSmallCaps('None')}
+${toSmallCaps('Views')}: ${file.views} | ${toSmallCaps('Downloads')}: ${file.downloads}
         `;
         await editMessage(fileText, getFileActionsKeyboard(fileId, user.userType));
     }
     else if (data.startsWith('rename_file_')) {
         const fileId = data.substring(12);
         USER_STATE.set(userId, { state: 'RENAMING_FILE', fileId: fileId });
-        await editMessage('📝 **Send the new file name:**', {
-            inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'file_' + fileId }]]
+        await editMessage(`📝 **${toSmallCaps('Send the new file name')}:**`, {
+            inline_keyboard: [[{ text: toSmallCaps('❌ Cancel'), callback_data: 'file_' + fileId }]]
         });
     }
     else if (data.startsWith('alias_file_')) {
         const fileId = data.substring(11);
-        if (user.userType !== 'PREMIUM' && user.userType !== 'ADMIN') return bot.answerCallbackQuery(query.id, { text: '🚫 Custom aliases are a Premium feature.', show_alert: true });
+        if (user.userType !== 'PREMIUM' && user.userType !== 'ADMIN') return bot.answerCallbackQuery(query.id, { text: toSmallCaps('🚫 Custom aliases are a Premium feature.'), show_alert: true });
         
         USER_STATE.set(userId, { state: 'SETTING_ALIAS', fileId: fileId });
-        await editMessage('🏷️ **Send the custom alias (3-30 chars, a-z, 0-9, hyphens only):**', {
-            inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'file_' + fileId }]]
+        await editMessage(`🏷️ **${toSmallCaps('Send the custom alias (3-30 chars, a-z, 0-9, hyphens only)')}:**`, {
+            inline_keyboard: [[{ text: toSmallCaps('❌ Cancel'), callback_data: 'file_' + fileId }]]
         });
     }
     else if (data.startsWith('delete_file_')) {
@@ -999,8 +1012,8 @@ Views: ${file.views} | Downloads: ${file.downloads}
             ANALYTICS.totalFiles = Math.max(0, ANALYTICS.totalFiles - 1);
             user.totalUploads = Math.max(0, user.totalUploads - 1);
             
-            await editMessage(`🗑️ **File Deleted!**\n\nThe link for **${file.fileName}** has been permanently removed.`, {
-                inline_keyboard: [[{ text: '🔙 Back to Files', callback_data: 'my_files_0' }]]
+            await editMessage(`🗑️ **${toSmallCaps('File Deleted!')}**\n\n${toSmallCaps('The link for')} **${file.fileName}** ${toSmallCaps('has been permanently removed.')}`, {
+                inline_keyboard: [[{ text: toSmallCaps('🔙 Back to Files'), callback_data: 'my_files_0' }]]
             });
         }
     }
@@ -1008,24 +1021,24 @@ Views: ${file.views} | Downloads: ${file.downloads}
     // --- Admin Panel Commands ---
     else if (data === 'admin_panel' && isAdmin(userId)) {
         const adminText = `
-👑 <b>Admin Panel</b>
+👑 <b>${toSmallCaps('Admin Panel')}</b>
 
-Welcome Admin!
-• Users: ${USER_DATABASE.size}
-• Files: ${FILE_DATABASE.size}
-• Chats/Channels: ${CHAT_DATABASE.size}
+${toSmallCaps('Welcome Admin!')}
+• ${toSmallCaps('Users')}: ${USER_DATABASE.size}
+• ${toSmallCaps('Files')}: ${FILE_DATABASE.size}
+• ${toSmallCaps('Chats/Channels')}: ${CHAT_DATABASE.size}
 
-Choose an option below:
+${toSmallCaps('Choose an option below')}:
         `;
         await editMessage(adminText, getAdminKeyboard());
     }
     else if (data === 'admin_list_channels' && isAdmin(userId)) {
         if (CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.length === 0) {
-            const listText = '🔗 **Mandatory Channels**\n\nNo channels are currently configured for force subscription.';
+            const listText = `🔗 **${toSmallCaps('Mandatory Channels')}**\n\n${toSmallCaps('No channels are currently configured for force subscription.')}`;
             await editMessage(listText, {
                 inline_keyboard: [
-                    [{ text: '➕ Add Channel', callback_data: 'admin_add_channel_prompt' }],
-                    [{ text: '🔙 Back', callback_data: 'admin_panel' }]
+                    [{ text: toSmallCaps('➕ Add Channel'), callback_data: 'admin_add_channel_prompt' }],
+                    [{ text: toSmallCaps('🔙 Back'), callback_data: 'admin_panel' }]
                 ]
             });
             return;
@@ -1033,15 +1046,15 @@ Choose an option below:
 
         const channelDetails = await Promise.all(CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.map(id => getChannelDetails(id)));
         
-        const listText = '🔗 **Mandatory Channels**\n\n' + channelDetails.map((d, i) => 
-            `${i + 1}. **${d.title}**\n   ID: <code>${d.id}</code>\n   Username: ${d.username || 'N/A (Private)'}`
+        const listText = `🔗 **${toSmallCaps('Mandatory Channels')}**\n\n` + channelDetails.map((d, i) => 
+            `${i + 1}. **${toSmallCaps(d.title)}**\n   ${toSmallCaps('ID')}: <code>${d.id}</code>\n   ${toSmallCaps('Username')}: ${d.username || toSmallCaps('N/A (Private)')}`
         ).join('\n\n');
         
         const keyboard = {
             inline_keyboard: [
-                ...channelDetails.map(d => ([{ text: `❌ Remove ${d.title.substring(0, 15)}...`, callback_data: `admin_remove_channel_${d.id}` }])),
-                [{ text: '➕ Add Channel', callback_data: 'admin_add_channel_prompt' }],
-                [{ text: '🔙 Back', callback_data: 'admin_panel' }]
+                ...channelDetails.map(d => ([{ text: toSmallCaps(`❌ Remove ${d.title.substring(0, 15)}...`), callback_data: `admin_remove_channel_${d.id}` }])),
+                [{ text: toSmallCaps('➕ Add Channel'), callback_data: 'admin_add_channel_prompt' }],
+                [{ text: toSmallCaps('🔙 Back'), callback_data: 'admin_panel' }]
             ]
         };
 
@@ -1049,8 +1062,8 @@ Choose an option below:
     }
     else if (data === 'admin_add_channel_prompt' && isAdmin(userId)) {
         USER_STATE.set(userId, { state: 'ADDING_JOIN_CHANNEL' });
-        await editMessage('🔗 **Add Mandatory Join Channel**\n\nSend the new Channel ID (e.g., `-100XXXXXXXXXX`) or Channel Username (e.g., `@mychannel`).', {
-            inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'admin_panel' }]]
+        await editMessage(`${toSmallCaps('🔗 Add Mandatory Join Channel')}\n\n${toSmallCaps('Send the new Channel ID (e.g.,')} \`-100XXXXXXXXXX\` ${toSmallCaps(') or Channel Username (e.g.,')} \`@mychannel\`).`, {
+            inline_keyboard: [[{ text: toSmallCaps('❌ Cancel'), callback_data: 'admin_panel' }]]
         });
     }
     else if (data.startsWith('admin_remove_channel_') && isAdmin(userId)) {
@@ -1058,7 +1071,7 @@ Choose an option below:
         CONFIG_STATE.FORCE_SUB_CHANNEL_IDS = CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.filter(id => id !== channelIdToRemove);
         CHANNEL_DETAILS_CACHE.delete(channelIdToRemove);
         
-        await bot.answerCallbackQuery(query.id, { text: '✅ Channel removed successfully!', show_alert: true });
+        await bot.answerCallbackQuery(query.id, { text: toSmallCaps('✅ Channel removed successfully!'), show_alert: true });
         // Re-open the list
         bot.emit('callback_query', { message: query.message, from: query.from, data: 'admin_list_channels', id: 'cmd_refresh_list' + Date.now(), chat_instance: 'dummy' });
     }
@@ -1069,41 +1082,41 @@ Choose an option below:
         
         const uptime = process.uptime();
         const statsText = `
-📊 <b>Detailed Statistics</b>
+📊 <b>${toSmallCaps('Detailed Statistics')}</b>
 
-👥 <b>Total Users:</b> ${USER_DATABASE.size}
-📣 <b>Total Chats/Channels:</b> ${CHAT_DATABASE.size}
-📁 <b>Total Files:</b> ${FILE_DATABASE.size}
-💾 <b>Total Storage:</b> ${formatFileSize(totalSize)}
-👁️ <b>Total Views:</b> ${ANALYTICS.totalViews}
-⬇️ <b>Total Downloads:</b> ${ANALYTICS.totalDownloads}
-⏱️ <b>Uptime:</b> ${formatUptime(uptime)}
+👥 <b>${toSmallCaps('Total Users')}:</b> ${USER_DATABASE.size}
+📣 <b>${toSmallCaps('Total Chats/Channels')}:</b> ${CHAT_DATABASE.size}
+📁 <b>${toSmallCaps('Total Files')}:</b> ${FILE_DATABASE.size}
+💾 <b>${toSmallCaps('Total Storage')}:</b> ${formatFileSize(totalSize)}
+👁️ <b>${toSmallCaps('Total Views')}:</b> ${ANALYTICS.totalViews}
+⬇️ <b>${toSmallCaps('Total Downloads')}:</b> ${ANALYTICS.totalDownloads}
+⏱️ <b>${toSmallCaps('Uptime')}:</b> ${formatUptime(uptime)}
         `;
         
         await editMessage(statsText, {
-            inline_keyboard: [[{ text: '🔙 Back', callback_data: 'admin_panel' }]]
+            inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'admin_panel' }]]
         });
     }
     else if (data === 'admin_broadcast_start' && isAdmin(userId)) {
         USER_STATE.set(userId, { state: 'BROADCASTING_MESSAGE_SETUP' });
-        await editMessage('📢 **Universal Broadcast Setup**\n\n**STEP 1:** Send the message (text, photo, or video) you want to broadcast to all users.', {
-            inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'admin_panel' }]]
+        await editMessage(`📢 **${toSmallCaps('Universal Broadcast Setup')}**\n\n**${toSmallCaps('STEP 1')}:** ${toSmallCaps('Send the message (text, photo, or video) you want to broadcast to all users.')}`, {
+            inline_keyboard: [[{ text: toSmallCaps('❌ Cancel'), callback_data: 'admin_panel' }]]
         });
     }
     else if (data === 'admin_stop_broadcast' && isAdmin(userId)) {
         if (BROADCAST_STATUS.jobInterval) clearInterval(BROADCAST_STATUS.jobInterval);
         BROADCAST_STATUS.isSending = false;
         
-        await editMessage('🛑 **Broadcast Stopped!**', {
-            inline_keyboard: [[{ text: '🔙 Back to Admin', callback_data: 'admin_panel' }]]
+        await editMessage(`🛑 **${toSmallCaps('Broadcast Stopped!')}**`, {
+            inline_keyboard: [[{ text: toSmallCaps('🔙 Back to Admin'), callback_data: 'admin_panel' }]]
         });
     }
     else if (data === 'admin_trigger_cleanup' && isAdmin(userId)) {
-        await bot.answerCallbackQuery(query.id, { text: '🧹 Running cleanup job...', show_alert: true });
+        await bot.answerCallbackQuery(query.id, { text: toSmallCaps('🧹 Running cleanup job...'), show_alert: true });
         const result = runMaintenanceJob(); 
         
-        await editMessage(`🧹 **Maintenance Report**\n\nCleaned ${result.cleanedFiles} expired files.\nCleaned ${result.cleanedCache} expired cache entries.`, {
-            inline_keyboard: [[{ text: '🔙 Back to Admin', callback_data: 'admin_panel' }]]
+        await editMessage(`🧹 **${toSmallCaps('Maintenance Report')}**\n\n${toSmallCaps('Cleaned')} ${result.cleanedFiles} ${toSmallCaps('expired files.')}\n${toSmallCaps('Cleaned')} ${result.cleanedCache} ${toSmallCaps('expired cache entries.')}`, {
+            inline_keyboard: [[{ text: toSmallCaps('🔙 Back to Admin'), callback_data: 'admin_panel' }]]
         });
     }
 
@@ -1148,9 +1161,9 @@ bot.on('message', async (msg) => {
             stateData.state = 'BROADCASTING_KEYBOARD_SETUP';
             USER_STATE.set(userId, stateData);
             
-            await bot.sendMessage(chatId, '📢 **Universal Broadcast Setup**\n\n**STEP 2:** Send the inline keyboard markup in JSON format (e.g., `[[{"text":"Go","url":"https://example.com"}]]`) or send **"SKIP"** to proceed without a button.', {
+            await bot.sendMessage(chatId, `📢 **${toSmallCaps('Universal Broadcast Setup')}**\n\n**${toSmallCaps('STEP 2')}:** ${toSmallCaps('Send the inline keyboard markup in JSON format (e.g.,')} \`[[{"text":"Go","url":"https://example.com"}]]\` ${toSmallCaps(') or send')} **${toSmallCaps('SKIP')}** ${toSmallCaps('to proceed without a button.')}`, {
                 parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'admin_panel' }]] }
+                reply_markup: { inline_keyboard: [[{ text: toSmallCaps('❌ Cancel'), callback_data: 'admin_panel' }]] }
             });
             return;
         }
@@ -1165,7 +1178,7 @@ bot.on('message', async (msg) => {
                     if (!Array.isArray(parsedKeyboard)) throw new Error('Not an array');
                     keyboard = { inline_keyboard: parsedKeyboard };
                 } catch (e) {
-                    return bot.sendMessage(chatId, '❌ Invalid JSON format for keyboard. Please re-send valid JSON or "SKIP".', { parse_mode: 'Markdown' });
+                    return bot.sendMessage(chatId, toSmallCaps('❌ Invalid JSON format for keyboard. Please re-send valid JSON or "SKIP".'), { parse_mode: 'Markdown' });
                 }
             }
             
@@ -1201,7 +1214,7 @@ bot.on('message', async (msg) => {
                 
                 if (CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.includes(actualId)) {
                     USER_STATE.delete(userId);
-                    return bot.sendMessage(chatId, '❌ **Failed!** This channel is already in the mandatory list.', { parse_mode: 'Markdown' });
+                    return bot.sendMessage(chatId, `❌ **${toSmallCaps('Failed!')}** ${toSmallCaps('This channel is already in the mandatory list.')}`, { parse_mode: 'Markdown' });
                 }
 
                 const isChannel = chatInfo.type === 'channel' || chatInfo.type === 'supergroup';
@@ -1211,17 +1224,17 @@ bot.on('message', async (msg) => {
                     CHANNEL_DETAILS_CACHE.set(actualId, { title: chatInfo.title, username: chatInfo.username ? `@${chatInfo.username}` : null, id: actualId });
                     
                     USER_STATE.delete(userId);
-                    await bot.sendMessage(chatId, `✅ **Mandatory Join Channel Added!**\n\nChannel: **${chatInfo.title}**\nID: <code>${actualId}</code>`, { parse_mode: 'HTML' });
+                    await bot.sendMessage(chatId, `✅ **${toSmallCaps('Mandatory Join Channel Added!')}**\n\n${toSmallCaps('Channel')}: **${chatInfo.title}**\n${toSmallCaps('ID')}: <code>${actualId}</code>`, { parse_mode: 'HTML' });
                     return;
                 } else {
-                    return bot.sendMessage(chatId, '❌ **Invalid Chat Type!** Please send the ID or Username of a Channel or Supergroup.', { parse_mode: 'Markdown' });
+                    return bot.sendMessage(chatId, `❌ **${toSmallCaps('Invalid Chat Type!')}** ${toSmallCaps('Please send the ID or Username of a Channel or Supergroup.')}`, { parse_mode: 'Markdown' });
                 }
             } catch (e) {
                 console.error('Error adding channel:', e.message);
-                return bot.sendMessage(chatId, '❌ **Channel Not Found!** Please ensure the ID/Username is correct and the bot is a member/admin of the channel.', { parse_mode: 'Markdown' });
+                return bot.sendMessage(chatId, `❌ **${toSmallCaps('Channel Not Found!')}** ${toSmallCaps('Please ensure the ID/Username is correct and the bot is a member/admin of the channel.')}`, { parse_mode: 'Markdown' });
             }
         } else {
-            return bot.sendMessage(chatId, '❌ **Invalid Input!** Please send a valid Channel ID (starting with -100) or a Channel Username (starting with @).', { parse_mode: 'Markdown' });
+            return bot.sendMessage(chatId, `❌ **${toSmallCaps('Invalid Input!')}** ${toSmallCaps('Please send a valid Channel ID (starting with -100) or a Channel Username (starting with @).')}`, { parse_mode: 'Markdown' });
         }
     }
 
@@ -1234,7 +1247,7 @@ bot.on('message', async (msg) => {
         if (stateData.state === 'RENAMING_FILE') {
             file.fileName = msg.text.trim();
             USER_STATE.delete(userId);
-            await bot.sendMessage(chatId, `✅ File renamed to **${file.fileName}**!`, { parse_mode: 'Markdown' });
+            await bot.sendMessage(chatId, `✅ ${toSmallCaps('File renamed to')} **${file.fileName}**!`, { parse_mode: 'Markdown' });
             return bot.emit('callback_query', { message: msg, from: msg.from, data: 'file_' + file.uniqueId, id: 'dummy_state' + Date.now(), chat_instance: 'dummy' });
         }
 
@@ -1243,7 +1256,7 @@ bot.on('message', async (msg) => {
             const aliasRegex = /^[a-z0-9-]+$/;
             
             if (!aliasRegex.test(alias) || alias.length < 3 || alias.length > 30) {
-                 return bot.sendMessage(chatId, `❌ Invalid alias. Use 3-30 characters (a-z, 0-9, hyphens only).`, { parse_mode: 'Markdown' });
+                 return bot.sendMessage(chatId, toSmallCaps(`❌ Invalid alias. Use 3-30 characters (a-z, 0-9, hyphens only).`), { parse_mode: 'Markdown' });
             }
 
             let isUnique = !findFile(alias); 
@@ -1252,9 +1265,9 @@ bot.on('message', async (msg) => {
                 if (file.customAlias) file.customAlias = null; 
                 file.customAlias = alias;
                 USER_STATE.delete(userId);
-                await bot.sendMessage(chatId, `✅ Custom alias set! Your new stream link is:\n\n<code>${WEBAPP_URL}/stream/${alias}</code>`, { parse_mode: 'HTML', disable_web_page_preview: true });
+                await bot.sendMessage(chatId, `✅ ${toSmallCaps('Custom alias set! Your new stream link is:')}\n\n<code>${WEBAPP_URL}/stream/${alias}</code>`, { parse_mode: 'HTML', disable_web_page_preview: true });
             } else {
-                await bot.sendMessage(chatId, `❌ Alias **${alias}** is already in use.`, { parse_mode: 'Markdown' });
+                await bot.sendMessage(chatId, `${toSmallCaps('❌ Alias')} **${alias}** ${toSmallCaps('is already in use.')}`, { parse_mode: 'Markdown' });
             }
             return bot.emit('callback_query', { message: msg, from: msg.from, data: 'file_' + file.uniqueId, id: 'dummy_state' + Date.now(), chat_instance: 'dummy' });
         }
@@ -1271,16 +1284,16 @@ bot.on('message', async (msg) => {
 
         if (!limitCheck.allowed) {
             return bot.sendMessage(chatId, `
-❌ <b>Link Generation Failed</b>
+❌ <b>${toSmallCaps('Link Generation Failed')}</b>
 
-You have reached your limit of <b>${limitCheck.limit}</b> links for your <b>${limitCheck.userType}</b> tier.
+${toSmallCaps('You have reached your limit of')} <b>${limitCheck.limit}</b> ${toSmallCaps('links for your')} <b>${limitCheck.userType}</b> ${toSmallCaps('tier.')}
             `, { parse_mode: 'HTML' });
         }
         
         try {
             const fileId = Array.isArray(file) ? file[file.length - 1].file_id : file.file_id;
             const fileUniqueId = Array.isArray(file) ? file[file.length - 1].file_unique_id : file.file_unique_id;
-            const fileName = file.file_name || (msg.caption || `file_${fileUniqueId}.mp4`);
+            const fileName = file.file_name || (msg.caption || `${toSmallCaps('file')}_${fileUniqueId}.mp4`);
             const fileSize = file.file_size || (Array.isArray(file) ? file[file.length - 1].file_size : 0);
             
             const uniqueId = generateUniqueId();
@@ -1307,20 +1320,20 @@ You have reached your limit of <b>${limitCheck.limit}</b> links for your <b>${li
             const streamLink = `${WEBAPP_URL}/stream/${uniqueId}`;
             const downloadLink = `${WEBAPP_URL}/download/${uniqueId}`;
             
-            const linkStatus = limitCheck.userType === 'PREMIUM' || limitCheck.userType === 'ADMIN' ? 'PERMANENT' : `Expires in ${formatRemainingTime(Date.now())}.`;
+            const linkStatus = limitCheck.userType === 'PREMIUM' || limitCheck.userType === 'ADMIN' ? toSmallCaps('PERMANENT') : `${toSmallCaps('Expires in')} ${formatRemainingTime(Date.now())}.`;
             
             const successText = `
-✅ <b>Permanent Link Generated Successfully!</b>
+✅ <b>${toSmallCaps('Permanent Link Generated Successfully!')}</b>
 
-📁 <b>File Name:</b> ${fileName}
-💾 <b>File Size:</b> ${formatFileSize(fileSize)}
+📁 <b>${toSmallCaps('File Name')}:</b> ${fileName}
+💾 <b>${toSmallCaps('File Size')}:</b> ${formatFileSize(fileSize)}
 
-🔗 <b>Streaming Link:</b>
+🔗 <b>${toSmallCaps('Streaming Link')}:</b>
 <code>${streamLink}</code>
 
-<b>✨ Link Status:</b> ${linkStatus}
+<b>✨ ${toSmallCaps('Link Status')}:</b> ${linkStatus}
 
-💡 <i>Your current link count: ${user.totalUploads} / ${limitCheck.limit}</i>
+💡 <i>${toSmallCaps('Your current link count')}: ${user.totalUploads} / ${limitCheck.limit}</i>
             `;
             
             await bot.sendMessage(chatId, successText, {
@@ -1329,12 +1342,12 @@ You have reached your limit of <b>${limitCheck.limit}</b> links for your <b>${li
                 reply_markup: {
                     inline_keyboard: [
                         [
-                            { text: '🔗 Open Stream', url: streamLink },
-                            { text: '⬇️ Download', url: downloadLink }
+                            { text: toSmallCaps('🔗 Open Stream'), url: streamLink },
+                            { text: toSmallCaps('⬇️ Download'), url: downloadLink }
                         ],
                         [
-                            { text: '📊 View Stats', callback_data: `file_stats_${uniqueId}` },
-                            { text: '🗑️ Delete File', callback_data: `delete_file_${uniqueId}` }
+                            { text: toSmallCaps('📊 View Stats'), callback_data: `file_stats_${uniqueId}` },
+                            { text: toSmallCaps('🗑️ Delete File'), callback_data: `delete_file_${uniqueId}` }
                         ]
                     ]
                 }
@@ -1342,7 +1355,7 @@ You have reached your limit of <b>${limitCheck.limit}</b> links for your <b>${li
             
         } catch (error) {
             console.error('❌ Upload error:', error);
-            await bot.sendMessage(chatId, '❌ <b>Error generating link.</b>\n\nPlease try again or contact admin.', {
+            await bot.sendMessage(chatId, `❌ <b>${toSmallCaps('Error generating link.')}</b>\n\n${toSmallCaps('Please try again or contact admin.')}`, {
                 parse_mode: 'HTML'
             });
         }
@@ -1369,7 +1382,7 @@ app.use((req, res, next) => {
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>BeatAnimes Link Generator Bot</h1><p>Bot is running. Start a conversation on Telegram.</p><p>Total Users: ${USER_DATABASE.size} | Total Files: ${FILE_DATABASE.size}</p>`);
+    res.send(`<h1>${toSmallCaps('BeatAnimes Link Generator Bot')}</h1><p>${toSmallCaps('Bot is running. Start a conversation on Telegram.')}</p><p>${toSmallCaps('Total Users')}: ${USER_DATABASE.size} | ${toSmallCaps('Total Files')}: ${FILE_DATABASE.size}</p>`);
 });
 
 app.get('/stream/:id', async (req, res) => {
@@ -1377,7 +1390,7 @@ app.get('/stream/:id', async (req, res) => {
     const fileData = findFile(id);
 
     if (!fileData || !isFilePermanent(fileData.uniqueId)) {
-        return res.status(404).send('File not found or has expired. Upgrade to Premium for permanent links.');
+        return res.status(404).send(toSmallCaps('File not found or has expired. Upgrade to Premium for permanent links.'));
     }
 
     try {
@@ -1421,7 +1434,7 @@ app.get('/stream/:id', async (req, res) => {
 
     } catch (error) {
         console.error('❌ Streaming Error:', error.message);
-        res.status(500).send('Streaming failed: Could not retrieve file from Telegram.');
+        res.status(500).send(toSmallCaps('Streaming failed: Could not retrieve file from Telegram.'));
     }
 });
 
@@ -1430,7 +1443,7 @@ app.get('/download/:id', async (req, res) => {
     const fileData = findFile(id);
 
     if (!fileData || !isFilePermanent(fileData.uniqueId)) {
-        return res.status(404).send('File not found or has expired. Upgrade to Premium for permanent links.');
+        return res.status(404).send(toSmallCaps('File not found or has expired. Upgrade to Premium for permanent links.'));
     }
 
     try {
@@ -1449,7 +1462,7 @@ app.get('/download/:id', async (req, res) => {
 
     } catch (error) {
         console.error('❌ Download Error:', error.message);
-        res.status(500).send('Download failed: Could not retrieve file from Telegram.');
+        res.status(500).send(toSmallCaps('Download failed: Could not retrieve file from Telegram.'));
     }
 });
 
@@ -1467,12 +1480,12 @@ setInterval(() => {
 
 app.listen(PORT, () => {
     console.log('═══════════════════════════════════════');
-    console.log('🎬 BeatAnimes Link Generator Bot');
+    console.log(`🎬 ${toSmallCaps('BeatAnimes Link Generator Bot')}`);
     console.log('═══════════════════════════════════════');
-    console.log(`✅ Server running on port ${PORT}`);
-    console.log(`📡 URL: ${WEBAPP_URL}`);
-    console.log(`👑 Admins: ${ADMIN_IDS.length}`);
-    console.log(`🤖 Bot is ready!`);
+    console.log(`✅ ${toSmallCaps('Server running on port')} ${PORT}`);
+    console.log(`📡 ${toSmallCaps('URL')}: ${WEBAPP_URL}`);
+    console.log(`👑 ${toSmallCaps('Admins')}: ${ADMIN_IDS.length}`);
+    console.log(`🤖 ${toSmallCaps('Bot is ready!')}`);
     console.log('═══════════════════════════════════════');
 });
 
