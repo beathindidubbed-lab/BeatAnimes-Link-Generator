@@ -1,8 +1,6 @@
 // ============================================
-// ULTIMATE TELEGRAM PERMANENT LINK BOT
-// Features: Tiers, Limits, Expiration, Referral, Universal Broadcast, 
-//           Universal Auto-Accept Join Requests, Channel Tracking, 
-//           Custom Aliases, Full Streaming Logic (Range Support).
+// ULTIMATE TELEGRAM PERMANENT LINK BOT (V2)
+// Improvements: Multi-Channel Force Sub, Verify Subscription Flow.
 // ============================================
 
 import TelegramBot from 'node-telegram-bot-api';
@@ -18,11 +16,10 @@ const PORT = process.env.PORT || 3000;
 
 // Admin Configuration
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id)) : [];
-// WELCOME_PHOTO_ID is now obsolete, replaced by WELCOME_SOURCE_CHANNEL/MESSAGE_ID
-const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME || '@YourChannel'; // Main channel for Force Join
+// CHANNEL_USERNAME is now deprecated, use FORCE_SUB_CHANNEL_IDS instead
+const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME || '@YourChannel'; 
 
-// Customization constants (FOR NEW WELCOME MESSAGE)
-// Using defaults from your provided Python snippet
+// Customization constants (FOR WELCOME MESSAGE)
 const WELCOME_SOURCE_CHANNEL = parseInt(process.env.WELCOME_SOURCE_CHANNEL || '-1002530952988'); 
 const WELCOME_SOURCE_MESSAGE_ID = parseInt(process.env.WELCOME_SOURCE_MESSAGE_ID || '32'); 
 const PUBLIC_ANIME_CHANNEL_URL = process.env.PUBLIC_ANIME_CHANNEL_URL || "https://t.me/BeatAnime";
@@ -59,9 +56,14 @@ const USER_STATE = new Map();
 
 // Global mutable config (can be changed via admin panel)
 const CONFIG_STATE = {
-    MANDATORY_CHANNEL_ID: process.env.MANDATORY_CHANNEL_ID || -1001234567890
+    // New structure for multiple mandatory channels. Initialize with the old ID if it exists.
+    FORCE_SUB_CHANNEL_IDS: process.env.MANDATORY_CHANNEL_ID 
+        ? [parseInt(process.env.MANDATORY_CHANNEL_ID)] 
+        : []
 };
 
+// Cache for channel details (title, username) to avoid repeated API calls
+const CHANNEL_DETAILS_CACHE = new Map(); 
 
 // Broadcast queue and status
 const BROADCAST_STATUS = {
@@ -100,8 +102,8 @@ bot.setMyCommands([
     { command: 'premium', description: 'Information about Premium upgrade and features' },
     { command: 'referral', description: 'Get your unique referral link and check bonus slots' },
     { command: 'admin', description: 'Open the admin control panel (Admins only)' },
-    { command: 'broadcast', description: 'Start a universal message broadcast (Admins only)' },
-    { command: 'cleanup', description: 'Run immediate file and cache maintenance (Admins only)' },
+    { command: 'addchannel', description: 'Add a mandatory join channel (Admins only)' },
+    { command: 'listchannels', description: 'List all mandatory join channels (Admins only)' },
 ]).then(() => console.log('✅ Telegram commands set.'));
 
 // ============================================
@@ -121,7 +123,7 @@ function formatFileSize(bytes) {
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) / 100 + ' ' + sizes[i];
+    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
 }
 
 function formatUptime(seconds) {
@@ -213,19 +215,6 @@ function findFile(id) {
     return fileData;
 }
 
-async function checkMembership(userId) {
-    const mandatoryId = CONFIG_STATE.MANDATORY_CHANNEL_ID;
-    if (isAdmin(userId) || mandatoryId === -1001234567890) return true; // Bypass check if default placeholder ID is used
-    
-    try {
-        const member = await bot.getChatMember(mandatoryId, userId);
-        const status = member.status;
-        return ['member', 'administrator', 'creator'].includes(status); 
-    } catch (e) {
-        return false; 
-    }
-}
-
 async function getFreshFileUrl(fileData) {
     const cacheKey = fileData.fileId;
     const cached = URL_CACHE.get(cacheKey);
@@ -253,17 +242,138 @@ async function getFreshFileUrl(fileData) {
 
 
 // ============================================
+// FEATURE: MULTI-CHANNEL FORCE SUBSCRIPTION
+// ============================================
+
+async function getChannelDetails(channelId) {
+    if (CHANNEL_DETAILS_CACHE.has(channelId)) {
+        return CHANNEL_DETAILS_CACHE.get(channelId);
+    }
+    try {
+        const chatInfo = await bot.getChat(channelId);
+        // Use full URL for public channels, or just name for private to show the title
+        const username = chatInfo.username ? `@${chatInfo.username}` : null;
+        const details = { title: chatInfo.title, username: username, id: channelId };
+        CHANNEL_DETAILS_CACHE.set(channelId, details);
+        return details;
+    } catch (e) {
+        console.error(`Error fetching chat details for ${channelId}: ${e.message}`);
+        return { title: `Unknown Channel (${channelId})`, username: null, id: channelId };
+    }
+}
+
+/**
+ * Checks membership for all required channels.
+ * @returns {{isMember: boolean, requiredChannels: Array<{id: number, title: string, username: string}>}}
+ */
+async function checkAllMemberships(userId) {
+    const channelIds = CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.filter(id => id); 
+    if (channelIds.length === 0) return { isMember: true, requiredChannels: [] };
+
+    const requiredChannels = [];
+    let isSubscribedToAll = true;
+
+    for (const id of channelIds) {
+        const details = await getChannelDetails(id);
+        requiredChannels.push({ id, ...details });
+        
+        try {
+            const member = await bot.getChatMember(id, userId);
+            // Statuses 'left' or 'kicked' mean the user is not a member.
+            if (member.status === 'left' || member.status === 'kicked') {
+                isSubscribedToAll = false;
+            }
+        } catch (e) {
+             // getChatMember throws error if status is 'left' for non-admins, or if user not found.
+             if (e.response && e.response.statusCode === 400 && (e.response.body.description.includes('user not found') || e.response.body.description.includes('user is not a member'))) {
+                 isSubscribedToAll = false;
+             }
+             else if (e.response && e.response.statusCode === 403) {
+                 // Bot was blocked or channel is inaccessible
+                 console.error(`Bot blocked by channel ${id}. Removing from list.`);
+                 // Auto-remove problematic channel ID
+                 CONFIG_STATE.FORCE_SUB_CHANNEL_IDS = CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.filter(cid => cid !== id);
+                 CHANNEL_DETAILS_CACHE.delete(id);
+                 isSubscribedToAll = false; 
+             }
+             else {
+                 // Other errors (e.g., bot not admin) - treat as failure for safety
+                 console.error(`Error checking membership in ${id} for user ${userId}: ${e.message}`);
+                 isSubscribedToAll = false; 
+             }
+        }
+        
+        if (!isSubscribedToAll) break; // Optimization
+    }
+    
+    return { isMember: isSubscribedToAll, requiredChannels };
+}
+
+function getForceJoinKeyboard(requiredChannels) {
+    const keyboard = [];
+    
+    for (const ch of requiredChannels) {
+        // Use a direct Telegram link for the button
+        const url = ch.username ? `https://t.me/${ch.username.replace('@', '')}` : 'https://t.me/telegram'; // Fallback to Telegram link for private
+        keyboard.push([{ text: `📢 ${ch.title}`, url: url }]);
+    }
+    
+    // The verify button uses the callback_data="verify_subscription"
+    keyboard.push([{ text: '✅ Click to continue', callback_data: 'verify_subscription' }]);
+    
+    return { inline_keyboard: keyboard };
+}
+
+
+/**
+ * Central function to check for force subscription and intercept execution if failed.
+ * @param {object} msg - Telegram message object.
+ * @param {function} action - The protected handler function to execute on success.
+ * @returns {Promise<boolean>} - True if action was executed, false if intercepted.
+ */
+async function forceSubCheckAndIntercept(msg, action) {
+    const userId = msg.from.id;
+    const chatId = msg.chat.id;
+    
+    if (isAdmin(userId)) {
+        await action();
+        return true; 
+    }
+
+    const { isMember, requiredChannels } = await checkAllMemberships(userId);
+    
+    if (isMember) {
+        await action();
+        return true; 
+    } else {
+        // Intercept: User is NOT a member, send prompt
+        const promptText = `
+⚠️ <b>ACCESS DENIED - Join Required</b>
+
+Hello ${msg.from.first_name}, to use this bot's powerful features, you must first join all of our mandatory channels listed below.
+
+Please join **ALL** channels and then click the 'Click to continue' button.
+        `;
+        
+        // Delete original message if it's a file upload/command to prevent processing
+        if (msg.photo || msg.video || msg.document || (msg.text && msg.text.startsWith('/'))) {
+             try { await bot.deleteMessage(chatId, msg.message_id); } catch (e) { /* Ignore */ }
+        }
+
+        await bot.sendMessage(chatId, promptText, {
+            parse_mode: 'HTML',
+            reply_markup: getForceJoinKeyboard(requiredChannels)
+        });
+        return false;
+    }
+}
+
+
+// ============================================
 // KEYBOARD & TEXT GENERATION
 // ============================================
 
-function getForceJoinKeyboard() {
-    return {
-        inline_keyboard: [
-            [{ text: `📢 Join ${CHANNEL_USERNAME}`, url: `https://t.me/${CHANNEL_USERNAME.replace('@', '')}` }],
-            [{ text: '✅ I have joined', callback_data: 'check_join' }]
-        ]
-    };
-}
+// Removed getForceJoinKeyboard as it is now getForceJoinKeyboard(requiredChannels)
 
 // **NEW** Custom Welcome Keyboard (Replaces the default welcome message UI)
 function getCustomWelcomeKeyboard(isAdminUser) {
@@ -320,11 +430,6 @@ function getAdminKeyboard() {
     const isBroadcasting = BROADCAST_STATUS.isSending;
     const broadcastText = isBroadcasting ? `⏳ Broadcast in Progress` : '📢 Universal Broadcast';
 
-    let currentChannel = CONFIG_STATE.MANDATORY_CHANNEL_ID.toString();
-    if (currentChannel === '-1001234567890') {
-         currentChannel = 'NOT SET';
-    }
-
     return {
         inline_keyboard: [
             [
@@ -336,7 +441,7 @@ function getAdminKeyboard() {
                 { text: '🧹 Cleanup Links/Cache', callback_data: 'admin_trigger_cleanup' }
             ],
             [
-                { text: `🔗 Set Join Channel (Current: ${currentChannel})`, callback_data: 'admin_set_join_channel' }
+                { text: `🔗 Manage Join Channels (${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.length})`, callback_data: 'admin_list_channels' }
             ],
             [
                 { text: '🔙 Back', callback_data: 'start_features' } // Back to Main Bot Features menu
@@ -388,17 +493,11 @@ function getFileActionsKeyboard(fileId, userType) {
     };
 }
 
-// **OLD FUNCTION - KEEPING FOR FORCE JOIN FALLBACK TEXT**
-function getWelcomeText(userId, firstName, isMember = true) {
+function getWelcomeText(userId, firstName) {
     const user = USER_DATABASE.get(userId) || registerUser(userId, null, firstName); 
     const limitCheck = canGenerateLink(userId);
 
-    let prefix = '';
-    if (!isMember && !isAdmin(userId)) {
-        prefix = `⚠️ <b>ACCESS DENIED - Join Required</b>\n\nYou must join our main channel to use this bot's features.\n\n`;
-    }
-
-    return prefix + `
+    return `
 🎬 <b>Welcome to BeatAnimes Link Generator!</b>
 
 ${firstName}, I'm here to help you create <b>permanent streaming links</b> for your videos! 🚀
@@ -434,10 +533,10 @@ function getHelpText() {
 - /referral: Get referral link.
 - /admin: Open admin panel ...[ADMIN]
 - /broadcast: Start mass message ...[ADMIN]
-- /cleanup: Run maintenance job ...[ADMIN]
+- /addchannel: Add force sub channel ...[ADMIN]
 
 <b>4. Important:</b>
-- You must remain a member of ${CHANNEL_USERNAME} to use the bot.
+- You must remain a member of all mandatory channels to use the bot.
     `;
 }
 
@@ -452,7 +551,7 @@ Enjoy the ultimate experience with Premium:
 3.  <b>CUSTOM ALIASES:</b> Set short, memorable URL slugs for your links.
 
 💰 <b>How to Upgrade:</b>
-Contact our support team ${CHANNEL_USERNAME} to purchase the premium plan!
+Contact our support team @${ADMIN_CONTACT_USERNAME} to purchase the premium plan!
 
 Thank you for supporting the bot!
     `;
@@ -492,6 +591,7 @@ This bot is designed to create permanent streaming and download links for media 
 // ============================================
 
 function runMaintenanceJob() {
+    // ... (Maintenance job logic remains the same)
     const now = Date.now();
     let cleanedFiles = 0;
     let cleanedCache = 0;
@@ -529,6 +629,7 @@ function runMaintenanceJob() {
 }
 
 function startBroadcastJob(chatId, sourceMessageId, keyboard) {
+    // ... (Broadcast job logic remains the same)
     if (BROADCAST_STATUS.isSending) return;
 
     BROADCAST_STATUS.isSending = true;
@@ -577,49 +678,16 @@ function startBroadcastJob(chatId, sourceMessageId, keyboard) {
 
 
 // ============================================
-// FEATURE: UNIVERSAL AUTO-ACCEPT JOIN REQUESTS
-// ============================================
-
-bot.on('chat_join_request', async (joinRequest) => {
-    const userId = joinRequest.from.id;
-    const chatId = joinRequest.chat.id; 
-    const firstName = joinRequest.from.first_name;
-    const chatTitle = joinRequest.chat.title || 'the channel';
-
-    try {
-        await bot.approveChatJoinRequest(chatId, userId);
-        
-        const welcomeMessage = `
-🎉 **Welcome, ${firstName}!**
-
-Your request to join **${chatTitle}** has been automatically approved.
-            
-**🚀 Start Using the Bot Now:** /start
-        `;
-        
-        await bot.sendMessage(userId, welcomeMessage, { parse_mode: 'Markdown' });
-        
-        console.log(`✅ Auto-Approved join request for ${firstName} (${userId}) in channel ${chatTitle} (${chatId})`);
-
-    } catch (error) {
-        console.error(`❌ Failed to approve join request for ${userId} in ${chatTitle}:`, error.message);
-        bot.declineChatJoinRequest(chatId, userId).catch(() => {});
-    }
-});
-
-
-// ============================================
 // BOT COMMANDS - ENTRY POINTS
 // ============================================
 
 const handleStartCommand = async (msg, match) => {
-    const chatId = msg.chat.id;
     const userId = msg.from.id;
     const username = msg.from.username;
     const firstName = msg.from.first_name;
     
     const referrerId = match ? parseInt(match[1]) : null;
-    let user = registerUser(userId, username, firstName, referrerId); 
+    const user = registerUser(userId, username, firstName, referrerId); 
 
     // Referral Logic
     if (referrerId && referrerId !== userId && !user.referrerId) {
@@ -633,116 +701,108 @@ const handleStartCommand = async (msg, match) => {
     }
     
     if (user.isBlocked) {
-         return bot.sendMessage(chatId, '❌ You have been **BLOCKED**...', { parse_mode: 'Markdown' });
+         return bot.sendMessage(msg.chat.id, '❌ You have been **BLOCKED**...', { parse_mode: 'Markdown' });
     }
-
-    const isMember = await checkMembership(userId);
     
-    // If not a member, show force join screen
-    if (!isMember && !isAdmin(userId)) {
-        const welcomeText = getWelcomeText(userId, firstName, isMember);
-        const keyboard = getForceJoinKeyboard();
-        return bot.sendMessage(chatId, welcomeText, { 
-            parse_mode: 'HTML', 
-            reply_markup: keyboard 
-        });
-    }
+    // --- FORCE SUB CHECK AND INTERCEPT ---
+    const action = async () => {
+        // This logic only runs if the user is a member of all channels (or is admin)
+        const chatId = msg.chat.id;
+        const customKeyboard = getCustomWelcomeKeyboard(isAdmin(userId));
 
-    // If member, show custom welcome screen (copy message)
-    const customKeyboard = getCustomWelcomeKeyboard(isAdmin(userId));
-
-    try {
-        // Attempt to copy the message
-        await bot.copyMessage(
-            chatId,
-            WELCOME_SOURCE_CHANNEL,
-            WELCOME_SOURCE_MESSAGE_ID,
-            { reply_markup: customKeyboard }
-        );
-    } catch (error) {
-        // Handle failure by sending a fallback text message
-        console.error(`Error copying welcome message: ${error.message}`);
-        const fallback_text = `👋 <b>Welcome to the bot!</b>\n\nUse the buttons below to navigate or send me a file to get started.`;
-        await bot.sendMessage(chatId, fallback_text, { 
-            parse_mode: 'HTML', 
-            reply_markup: customKeyboard 
-        });
-    }
+        try {
+            // Attempt to copy the message
+            await bot.copyMessage(
+                chatId,
+                WELCOME_SOURCE_CHANNEL,
+                WELCOME_SOURCE_MESSAGE_ID,
+                { reply_markup: customKeyboard }
+            );
+        } catch (error) {
+            // Handle failure by sending a fallback text message
+            console.error(`Error copying welcome message: ${error.message}`);
+            const fallback_text = `👋 <b>Welcome to the bot!</b>\n\nUse the buttons below to navigate or send me a file to get started.`;
+            await bot.sendMessage(chatId, fallback_text, { 
+                parse_mode: 'HTML', 
+                reply_markup: customKeyboard 
+            });
+        }
+    };
+    
+    await forceSubCheckAndIntercept(msg, action);
 };
 
 bot.onText(/\/start(?:\s+(\d+))?/, handleStartCommand);
 
 // New commands for all features
-bot.onText(/\/(help|stats|files|admin|premium|upgrade|referral|broadcast|cleanup)/, async (msg, match) => {
+bot.onText(/\/(help|stats|files|admin|premium|upgrade|referral|broadcast|cleanup|addchannel|listchannels)/, async (msg, match) => {
     const command = match[1];
     const userId = msg.from.id;
     const chatId = msg.chat.id;
     
-    // **Admin check with custom message**
-    if (['admin', 'broadcast', 'cleanup'].includes(command) && !isAdmin(userId)) {
-        return bot.sendMessage(chatId, '❌ You are not authorized to use this command. It is not for you cutie.', { parse_mode: 'Markdown' });
-    }
-
-    // Force Join Check for non-admin, non-start/help commands
-    if (!['start', 'help'].includes(command)) {
-        const isMember = await checkMembership(userId);
-        if (!isMember) {
-            const joinText = getWelcomeText(userId, msg.from.first_name, false);
-            return bot.sendMessage(chatId, joinText, { 
-                parse_mode: 'HTML',
-                reply_markup: getForceJoinKeyboard()
-            });
+    // --- ADMIN COMMANDS (Immediate execution or state setup) ---
+    if (['admin', 'broadcast', 'cleanup', 'addchannel', 'listchannels'].includes(command) && isAdmin(userId)) {
+        if (command === 'admin') {
+            return bot.emit('callback_query', { message: msg, from: msg.from, data: 'admin_panel', id: 'cmd_admin' + Date.now(), chat_instance: 'dummy' });
         }
+        if (command === 'broadcast') {
+            return bot.emit('callback_query', { message: msg, from: msg.from, data: 'admin_broadcast_start', id: 'cmd_broadcast' + Date.now(), chat_instance: 'dummy' });
+        }
+        if (command === 'cleanup') {
+            return bot.emit('callback_query', { message: msg, from: msg.from, data: 'admin_trigger_cleanup', id: 'cmd_cleanup' + Date.now(), chat_instance: 'dummy' });
+        }
+        if (command === 'addchannel') {
+            USER_STATE.set(userId, { state: 'ADDING_JOIN_CHANNEL' });
+            return bot.sendMessage(chatId, '🔗 **Add Mandatory Join Channel**\n\nSend the new Channel ID (e.g., `-100XXXXXXXXXX`) or Channel Username (e.g., `@mychannel`).', { parse_mode: 'Markdown' });
+        }
+        if (command === 'listchannels') {
+            return bot.emit('callback_query', { message: msg, from: msg.from, data: 'admin_list_channels', id: 'cmd_listchannel' + Date.now(), chat_instance: 'dummy' });
+        }
+    } else if (['admin', 'broadcast', 'cleanup', 'addchannel', 'listchannels'].includes(command) && !isAdmin(userId)) {
+        return bot.sendMessage(chatId, '❌ You are not authorized to use this command.', { parse_mode: 'Markdown' });
     }
 
-    // Trigger the corresponding callback flow
-    let callbackData;
-    let isCommandOnly = false; 
-    switch (command) {
-        case 'help':
-            const helpText = getHelpText();
-            await bot.sendMessage(chatId, helpText, { 
-                parse_mode: 'HTML',
-                disable_web_page_preview: true,
-                reply_markup: { inline_keyboard: [[{ text: '🔙 Back to Welcome', callback_data: 'user_back' }]] }
-            });
-            isCommandOnly = true;
-            break;
-        case 'stats':
-            callbackData = 'my_stats';
-            break;
-        case 'files':
-            callbackData = 'my_files_0';
-            break;
-        case 'premium':
-        case 'upgrade':
-            callbackData = 'premium_info';
-            break;
-        case 'referral':
-            callbackData = 'referral_info';
-            break;
-        case 'admin':
-            callbackData = 'admin_panel';
-            break;
-        case 'broadcast':
-            bot.emit('callback_query', { message: msg, from: msg.from, data: 'admin_broadcast_start', id: 'cmd_broadcast' + Date.now(), chat_instance: 'dummy' });
-            isCommandOnly = true;
-            return;
-        case 'cleanup':
-            bot.emit('callback_query', { message: msg, from: msg.from, data: 'admin_trigger_cleanup', id: 'cmd_cleanup' + Date.now(), chat_instance: 'dummy' });
-            isCommandOnly = true;
-            return;
-        default:
-            return;
+    // --- PROTECTED USER COMMANDS ---
+    if (command === 'help') {
+        const helpText = getHelpText();
+        await bot.sendMessage(chatId, helpText, { 
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: { inline_keyboard: [[{ text: '🔙 Back to Welcome', callback_data: 'user_back' }]] }
+        });
+        return;
     }
-    
-    if (!isCommandOnly) {
+
+    const action = async () => {
+        let callbackData;
+        switch (command) {
+            case 'stats':
+                callbackData = 'my_stats';
+                break;
+            case 'files':
+                callbackData = 'my_files_0';
+                break;
+            case 'premium':
+            case 'upgrade':
+                callbackData = 'premium_info';
+                break;
+            case 'referral':
+                callbackData = 'referral_info';
+                break;
+            default:
+                return;
+        }
+        
+        // Emit a callback query to handle the command flow within the main menu logic
         const dummyQuery = {
             message: msg, from: msg.from, data: callbackData, 
             id: 'dummy_cmd' + Date.now(), chat_instance: 'dummy' 
         };
         bot.emit('callback_query', dummyQuery); 
-    }
+    };
+
+    // Intercept protected user commands
+    await forceSubCheckAndIntercept(msg, action);
 });
 
 
@@ -761,12 +821,6 @@ bot.on('callback_query', async (query) => {
         return bot.answerCallbackQuery(query.id, { text: '❌ You are blocked from using the bot.', show_alert: true }); 
     }
 
-    const isMember = await checkMembership(userId);
-    if (!isMember && !isAdmin(userId) && !['check_join', 'start', 'start_features', 'user_back', 'help', 'premium_info', 'referral_info'].includes(data)) {
-        await bot.answerCallbackQuery(query.id, { text: '⚠️ You must join the channel to continue.', show_alert: true });
-        return;
-    }
-
     // Function to edit the message
     const editMessage = async (text, keyboard, disablePreview = false) => {
         try {
@@ -774,18 +828,47 @@ bot.on('callback_query', async (query) => {
                 chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: disablePreview
             });
         } catch (e) {
-            // Handle edit failure (e.g., if the message was copied media or command-sent message)
+            // ... (Edit failure fallback logic remains the same)
              if (query.message.photo || query.message.video || query.message.animation || query.message.document || query.message.caption) {
-                // If the message contains media, we can't edit it to just text. We must delete and resend.
                 try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
                 await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: disablePreview });
             } else if (query.id.startsWith('dummy_cmd') || query.id.startsWith('cmd_')) {
-                // If it's a dummy callback from a command, send a new message.
                 await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: disablePreview });
             }
         }
     };
     
+    // --- FORCE SUB VERIFICATION HANDLER (Python-style flow) ---
+    if (data === 'verify_subscription') {
+        const { isMember, requiredChannels } = await checkAllMemberships(userId);
+        
+        if (isMember) {
+            // Success! Delete old prompt and re-emit /start
+            try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
+            bot.emit('message', { ...query.message, text: '/start', from: query.from, chat: { id: chatId } });
+            return bot.answerCallbackQuery(query.id, { text: '✅ Access Granted! Welcome!', show_alert: true });
+        } else {
+            // Still not a member, re-show the prompt with the keyboard
+            const promptText = `
+⚠️ <b>ACCESS DENIED - Join Required</b>
+
+You are still not a member of all required channels. Please join **ALL** channels and then click the 'Click to continue' button.
+            `;
+            const keyboard = getForceJoinKeyboard(requiredChannels);
+            await editMessage(promptText, keyboard); // Use edit to update the current message
+            return bot.answerCallbackQuery(query.id, { text: '⚠️ Please join all channels listed above.', show_alert: true });
+        }
+    }
+
+
+    // --- Global Membership Check for All Other Callbacks ---
+    const { isMember } = await checkAllMemberships(userId);
+    if (!isMember && !isAdmin(userId)) {
+        await bot.answerCallbackQuery(query.id, { text: '⚠️ You must join the channel(s) to view this menu.', show_alert: true });
+        // Don't proceed to handle other data if check fails
+        return; 
+    }
+
     // --- Custom Welcome Menu Handlers ---
     if (data === 'start' || data === 'user_back') {
         // Re-trigger /start command logic to show the welcome media message
@@ -796,9 +879,8 @@ bot.on('callback_query', async (query) => {
     
     // Navigate to the old main menu
     else if (data === 'start_features') {
-        const welcomeText = getWelcomeText(userId, user.firstName, true);
+        const welcomeText = getWelcomeText(userId, user.firstName);
         const keyboard = getMainKeyboard(isAdmin(userId));
-        // Use editMessage here since it's navigating away from a media message's caption/keyboard
         await editMessage(welcomeText, keyboard); 
     }
     
@@ -817,7 +899,6 @@ bot.on('callback_query', async (query) => {
         const aboutText = getAboutText();
         const keyboard = { inline_keyboard: [[{ text: "🔙 BACK", callback_data: "user_back" }]] };
         
-        // Delete the previous welcome message and send the new one
         try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
         await bot.sendMessage(chatId, aboutText, { 
             parse_mode: 'HTML', 
@@ -826,36 +907,9 @@ bot.on('callback_query', async (query) => {
         return bot.answerCallbackQuery(query.id);
     }
     
-    // --- Force Join Check ---
-    else if (data === 'check_join') {
-        const isNowMember = await checkMembership(userId);
-        if (isNowMember) {
-            // Delete old message and resend fresh /start to fully refresh the menu
-            try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
-            bot.emit('message', { ...query.message, text: '/start', from: query.from, chat: { id: chatId } });
-            return bot.answerCallbackQuery(query.id, { text: '✅ Access Granted! Welcome!', show_alert: true });
-        } else {
-            return bot.answerCallbackQuery(query.id, { text: '⚠️ Still not a member. Please join and try again.', show_alert: true });
-        }
-    }
-
-    // --- Core Commands ---
-    else if (data === 'help') {
-        // If called via callback, edit the message. 
-        if (!query.id.startsWith('dummy_cmd')) {
-            const helpText = getHelpText();
-            await editMessage(helpText, { inline_keyboard: [[{ text: '🔙 Back to Welcome', callback_data: 'user_back' }]] }, true);
-        }
-    } else if (data === 'premium_info') {
-        const premiumText = getPremiumText();
-        await editMessage(premiumText, { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]] });
-    } else if (data === 'referral_info') {
-        const referralText = getReferralText(userId);
-        await editMessage(referralText, { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]] }, true);
-    } 
-    
-    // --- My Stats ---
+    // --- Core Commands (Stats, Premium, Referral, Files...) ---
     else if (data === 'my_stats') {
+        // ... (Logic remains the same)
         const limitCheck = canGenerateLink(userId);
         const totalViews = Array.from(FILE_DATABASE.values()).filter(f => f.uploadedBy === userId).reduce((sum, f) => sum + f.views, 0);
         const statsText = `
@@ -870,7 +924,14 @@ bot.on('callback_query', async (query) => {
             inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]]
         });
     }
-
+    // ... (Other handlers like my_files_, premium_info, referral_info, file_ etc. remain the same) ...
+    else if (data === 'premium_info') {
+        const premiumText = getPremiumText();
+        await editMessage(premiumText, { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]] });
+    } else if (data === 'referral_info') {
+        const referralText = getReferralText(userId);
+        await editMessage(referralText, { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'start_features' }]] }, true);
+    } 
     // --- My Files List (with Pagination) ---
     const PAGE_SIZE = 5;
     if (data.startsWith('my_files_')) {
@@ -899,7 +960,7 @@ bot.on('callback_query', async (query) => {
         });
     }
     
-    // --- File Details and Actions ---
+    // --- File Details and Actions (file_, rename_, alias_, delete_) logic remains the same ---
     else if (data.startsWith('file_')) {
         const fileId = data.substring(5);
         const file = FILE_DATABASE.get(fileId);
@@ -958,13 +1019,50 @@ Choose an option below:
         `;
         await editMessage(adminText, getAdminKeyboard());
     }
-    else if (data === 'admin_set_join_channel' && isAdmin(userId)) {
-        USER_STATE.set(userId, { state: 'SETTING_JOIN_CHANNEL' });
-        const currentId = CONFIG_STATE.MANDATORY_CHANNEL_ID;
-        await editMessage(`🔗 **Set Mandatory Join Channel**\n\nSend the new Channel ID (e.g., \`-100XXXXXXXXXX\`) or Channel Username (e.g., \`@mychannel\`).\n\nCurrent ID: <code>${currentId}</code>`, {
+    else if (data === 'admin_list_channels' && isAdmin(userId)) {
+        if (CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.length === 0) {
+            const listText = '🔗 **Mandatory Channels**\n\nNo channels are currently configured for force subscription.';
+            await editMessage(listText, {
+                inline_keyboard: [
+                    [{ text: '➕ Add Channel', callback_data: 'admin_add_channel_prompt' }],
+                    [{ text: '🔙 Back', callback_data: 'admin_panel' }]
+                ]
+            });
+            return;
+        }
+
+        const channelDetails = await Promise.all(CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.map(id => getChannelDetails(id)));
+        
+        const listText = '🔗 **Mandatory Channels**\n\n' + channelDetails.map((d, i) => 
+            `${i + 1}. **${d.title}**\n   ID: <code>${d.id}</code>\n   Username: ${d.username || 'N/A (Private)'}`
+        ).join('\n\n');
+        
+        const keyboard = {
+            inline_keyboard: [
+                ...channelDetails.map(d => ([{ text: `❌ Remove ${d.title.substring(0, 15)}...`, callback_data: `admin_remove_channel_${d.id}` }])),
+                [{ text: '➕ Add Channel', callback_data: 'admin_add_channel_prompt' }],
+                [{ text: '🔙 Back', callback_data: 'admin_panel' }]
+            ]
+        };
+
+        await editMessage(listText, keyboard);
+    }
+    else if (data === 'admin_add_channel_prompt' && isAdmin(userId)) {
+        USER_STATE.set(userId, { state: 'ADDING_JOIN_CHANNEL' });
+        await editMessage('🔗 **Add Mandatory Join Channel**\n\nSend the new Channel ID (e.g., `-100XXXXXXXXXX`) or Channel Username (e.g., `@mychannel`).', {
             inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'admin_panel' }]]
         });
     }
+    else if (data.startsWith('admin_remove_channel_') && isAdmin(userId)) {
+        const channelIdToRemove = parseInt(data.substring(21));
+        CONFIG_STATE.FORCE_SUB_CHANNEL_IDS = CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.filter(id => id !== channelIdToRemove);
+        CHANNEL_DETAILS_CACHE.delete(channelIdToRemove);
+        
+        await bot.answerCallbackQuery(query.id, { text: '✅ Channel removed successfully!', show_alert: true });
+        // Re-open the list
+        bot.emit('callback_query', { message: query.message, from: query.from, data: 'admin_list_channels', id: 'cmd_refresh_list' + Date.now(), chat_instance: 'dummy' });
+    }
+    // ... (Other admin commands remain the same) ...
     else if (data === 'admin_stats' && isAdmin(userId)) {
         let totalSize = 0;
         for (const file of FILE_DATABASE.values()) { totalSize += file.fileSize || 0; }
@@ -1038,7 +1136,10 @@ bot.on('message', async (msg) => {
         CHAT_DATABASE.set(chatId, { id: chatId, title: msg.chat.title, type: msg.chat.type, lastActive: Date.now() });
     }
     
-    // 2. Admin State Check (Broadcast) - Full Logic
+    // Commands are handled by onText, non-commands/state are handled below.
+    if (msg.text && msg.text.startsWith('/')) return;
+    
+    // 2. Admin State Check (Broadcast) - Full Logic (Remains the same)
     if (isAdmin(userId) && USER_STATE.has(userId) && USER_STATE.get(userId).state.startsWith('BROADCASTING_')) {
         const stateData = USER_STATE.get(userId);
         
@@ -1075,52 +1176,55 @@ bot.on('message', async (msg) => {
         }
     }
     
-    // 3. Admin State Check (Setting Join Channel ID)
-    if (isAdmin(userId) && USER_STATE.has(userId) && USER_STATE.get(userId).state === 'SETTING_JOIN_CHANNEL' && msg.text) {
+    // 3. Admin State Check (Adding Join Channel ID) - UPDATED
+    if (isAdmin(userId) && USER_STATE.has(userId) && USER_STATE.get(userId).state === 'ADDING_JOIN_CHANNEL' && msg.text) {
         let newIdText = msg.text.trim();
         let newId;
 
+        // Try to parse ID
         if (newIdText.startsWith('-100')) {
              newId = parseInt(newIdText);
              if (isNaN(newId)) newId = null;
         } 
-        else if (newIdText.startsWith('@')) {
-             newId = newIdText;
+        // Use username/link
+        else if (newIdText.startsWith('@') || newIdText.startsWith('t.me')) {
+             newId = newIdText.split('/').pop().replace('@', ''); // Extract username
         } else {
              newId = null;
         }
 
         if (newId) {
             try {
+                // If it's a username, get the chat info to resolve the ID
                 const chatInfo = await bot.getChat(newId);
+                const actualId = chatInfo.id;
+                
+                if (CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.includes(actualId)) {
+                    USER_STATE.delete(userId);
+                    return bot.sendMessage(chatId, '❌ **Failed!** This channel is already in the mandatory list.', { parse_mode: 'Markdown' });
+                }
+
                 const isChannel = chatInfo.type === 'channel' || chatInfo.type === 'supergroup';
                 
                 if (isChannel) {
-                    try {
-                        const botMember = await bot.getChatMember(newId, BOT_TOKEN.split(':')[0]);
-                        const isBotAdmin = ['administrator', 'creator'].includes(botMember.status);
-                        
-                        if (isBotAdmin) {
-                            CONFIG_STATE.MANDATORY_CHANNEL_ID = newId;
-                            USER_STATE.delete(userId);
-                            await bot.sendMessage(chatId, `✅ **Mandatory Join Channel Set!**\n\nNew ID/Username: <code>${newId}</code>.\n\nNote: Bot must be an admin for auto-approvals to work.`, { parse_mode: 'HTML' });
-                            return;
-                        } else {
-                            return bot.sendMessage(chatId, '❌ **Failed!** The bot must be an **Administrator** in this channel/group to check user membership and approve join requests.', { parse_mode: 'Markdown' });
-                        }
-                    } catch(e) {
-                         return bot.sendMessage(chatId, `❌ **Failed!** Channel found, but could not verify bot's admin status. Make sure the ID/Username is correct and the bot is an admin.`, { parse_mode: 'Markdown' });
-                    }
+                    CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.push(actualId);
+                    CHANNEL_DETAILS_CACHE.set(actualId, { title: chatInfo.title, username: chatInfo.username ? `@${chatInfo.username}` : null, id: actualId });
+                    
+                    USER_STATE.delete(userId);
+                    await bot.sendMessage(chatId, `✅ **Mandatory Join Channel Added!**\n\nChannel: **${chatInfo.title}**\nID: <code>${actualId}</code>`, { parse_mode: 'HTML' });
+                    return;
                 } else {
                     return bot.sendMessage(chatId, '❌ **Invalid Chat Type!** Please send the ID or Username of a Channel or Supergroup.', { parse_mode: 'Markdown' });
                 }
             } catch (e) {
-                return bot.sendMessage(chatId, '❌ **Channel Not Found!** Please ensure the ID/Username is correct and the bot is a member of the channel.', { parse_mode: 'Markdown' });
+                console.error('Error adding channel:', e.message);
+                return bot.sendMessage(chatId, '❌ **Channel Not Found!** Please ensure the ID/Username is correct and the bot is a member/admin of the channel.', { parse_mode: 'Markdown' });
             }
         } else {
             return bot.sendMessage(chatId, '❌ **Invalid Input!** Please send a valid Channel ID (starting with -100) or a Channel Username (starting with @).', { parse_mode: 'Markdown' });
         }
     }
+
 
     // 4. User State Check (Renaming / Setting Alias)
     if (USER_STATE.has(userId) && msg.text) {
@@ -1131,7 +1235,6 @@ bot.on('message', async (msg) => {
             file.fileName = msg.text.trim();
             USER_STATE.delete(userId);
             await bot.sendMessage(chatId, `✅ File renamed to **${file.fileName}**!`, { parse_mode: 'Markdown' });
-            // Simulate callback to show file details after action
             return bot.emit('callback_query', { message: msg, from: msg.from, data: 'file_' + file.uniqueId, id: 'dummy_state' + Date.now(), chat_instance: 'dummy' });
         }
 
@@ -1146,7 +1249,6 @@ bot.on('message', async (msg) => {
             let isUnique = !findFile(alias); 
             
             if (isUnique) {
-                // Clear old alias if one exists
                 if (file.customAlias) file.customAlias = null; 
                 file.customAlias = alias;
                 USER_STATE.delete(userId);
@@ -1154,73 +1256,60 @@ bot.on('message', async (msg) => {
             } else {
                 await bot.sendMessage(chatId, `❌ Alias **${alias}** is already in use.`, { parse_mode: 'Markdown' });
             }
-            // Simulate callback to show file details after action
             return bot.emit('callback_query', { message: msg, from: msg.from, data: 'file_' + file.uniqueId, id: 'dummy_state' + Date.now(), chat_instance: 'dummy' });
         }
     }
     
-    // Commands are handled by onText, non-commands are handled below.
-    if (msg.text && msg.text.startsWith('/')) return;
-    
-    // 5. Force Join Check
-    const isMember = await checkMembership(userId);
-    if (!isMember) {
-        const joinText = getWelcomeText(userId, firstName, false);
-        return bot.sendMessage(chatId, joinText, { 
-            parse_mode: 'HTML',
-            reply_markup: getForceJoinKeyboard()
-        });
-    }
-    
-    // 6. File Upload Logic
+    // 5. File Upload Logic - WRAPPED IN PROTECTED ACTION
     const file = msg.video || msg.document || msg.video_note || msg.photo;
     
     if (!file) return;
 
-    // Limit Enforcement
-    const limitCheck = canGenerateLink(userId);
+    const action = async () => {
+        // Limit Enforcement
+        const limitCheck = canGenerateLink(userId);
 
-    if (!limitCheck.allowed) {
-        return bot.sendMessage(chatId, `
+        if (!limitCheck.allowed) {
+            return bot.sendMessage(chatId, `
 ❌ <b>Link Generation Failed</b>
 
 You have reached your limit of <b>${limitCheck.limit}</b> links for your <b>${limitCheck.userType}</b> tier.
-        `, { parse_mode: 'HTML' });
-    }
-    
-    try {
-        const fileId = Array.isArray(file) ? file[file.length - 1].file_id : file.file_id;
-        const fileUniqueId = Array.isArray(file) ? file[file.length - 1].file_unique_id : file.file_unique_id;
-        const fileName = file.file_name || (msg.caption || `file_${fileUniqueId}.mp4`);
-        const fileSize = file.file_size || (Array.isArray(file) ? file[file.length - 1].file_size : 0);
+            `, { parse_mode: 'HTML' });
+        }
         
-        const uniqueId = generateUniqueId();
-        
-        FILE_DATABASE.set(uniqueId, {
-            uniqueId: uniqueId,
-            fileId: fileId,
-            fileUniqueId: fileUniqueId,
-            fileName: fileName,
-            fileSize: fileSize,
-            uploadedBy: userId,
-            uploaderName: firstName,
-            chatId: chatId,
-            createdAt: Date.now(),
-            views: 0,
-            downloads: 0,
-            lastAccessed: Date.now(),
-            customAlias: null
-        });
-        
-        user.totalUploads++;
-        ANALYTICS.totalFiles++;
-        
-        const streamLink = `${WEBAPP_URL}/stream/${uniqueId}`;
-        const downloadLink = `${WEBAPP_URL}/download/${uniqueId}`;
-        
-        const linkStatus = limitCheck.userType === 'PREMIUM' || limitCheck.userType === 'ADMIN' ? 'PERMANENT' : `Expires in ${formatRemainingTime(Date.now())}.`;
-        
-        const successText = `
+        try {
+            const fileId = Array.isArray(file) ? file[file.length - 1].file_id : file.file_id;
+            const fileUniqueId = Array.isArray(file) ? file[file.length - 1].file_unique_id : file.file_unique_id;
+            const fileName = file.file_name || (msg.caption || `file_${fileUniqueId}.mp4`);
+            const fileSize = file.file_size || (Array.isArray(file) ? file[file.length - 1].file_size : 0);
+            
+            const uniqueId = generateUniqueId();
+            
+            FILE_DATABASE.set(uniqueId, {
+                uniqueId: uniqueId,
+                fileId: fileId,
+                fileUniqueId: fileUniqueId,
+                fileName: fileName,
+                fileSize: fileSize,
+                uploadedBy: userId,
+                uploaderName: firstName,
+                chatId: chatId,
+                createdAt: Date.now(),
+                views: 0,
+                downloads: 0,
+                lastAccessed: Date.now(),
+                customAlias: null
+            });
+            
+            user.totalUploads++;
+            ANALYTICS.totalFiles++;
+            
+            const streamLink = `${WEBAPP_URL}/stream/${uniqueId}`;
+            const downloadLink = `${WEBAPP_URL}/download/${uniqueId}`;
+            
+            const linkStatus = limitCheck.userType === 'PREMIUM' || limitCheck.userType === 'ADMIN' ? 'PERMANENT' : `Expires in ${formatRemainingTime(Date.now())}.`;
+            
+            const successText = `
 ✅ <b>Permanent Link Generated Successfully!</b>
 
 📁 <b>File Name:</b> ${fileName}
@@ -1232,31 +1321,35 @@ You have reached your limit of <b>${limitCheck.limit}</b> links for your <b>${li
 <b>✨ Link Status:</b> ${linkStatus}
 
 💡 <i>Your current link count: ${user.totalUploads} / ${limitCheck.limit}</i>
-        `;
-        
-        await bot.sendMessage(chatId, successText, {
-            parse_mode: 'HTML',
-            disable_web_page_preview: true,
-            reply_markup: {
-                inline_keyboard: [
-                    [
-                        { text: '🔗 Open Stream', url: streamLink },
-                        { text: '⬇️ Download', url: downloadLink }
-                    ],
-                    [
-                        { text: '📊 View Stats', callback_data: `file_stats_${uniqueId}` },
-                        { text: '🗑️ Delete File', callback_data: `delete_file_${uniqueId}` }
+            `;
+            
+            await bot.sendMessage(chatId, successText, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            { text: '🔗 Open Stream', url: streamLink },
+                            { text: '⬇️ Download', url: downloadLink }
+                        ],
+                        [
+                            { text: '📊 View Stats', callback_data: `file_stats_${uniqueId}` },
+                            { text: '🗑️ Delete File', callback_data: `delete_file_${uniqueId}` }
+                        ]
                     ]
-                ]
-            }
-        });
-        
-    } catch (error) {
-        console.error('❌ Upload error:', error);
-        await bot.sendMessage(chatId, '❌ <b>Error generating link.</b>\n\nPlease try again or contact admin.', {
-            parse_mode: 'HTML'
-        });
-    }
+                }
+            });
+            
+        } catch (error) {
+            console.error('❌ Upload error:', error);
+            await bot.sendMessage(chatId, '❌ <b>Error generating link.</b>\n\nPlease try again or contact admin.', {
+                parse_mode: 'HTML'
+            });
+        }
+    };
+    
+    // Intercept file upload
+    await forceSubCheckAndIntercept(msg, action);
 });
 
 
