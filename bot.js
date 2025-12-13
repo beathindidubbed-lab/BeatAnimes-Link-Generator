@@ -1,6 +1,6 @@
 // =========================================================================
 // ULTIMATE TELEGRAM PERMANENT LINK BOT (V13 - MAX LENGTH, MAX FEATURES, MONOLITHIC)
-// MERGED: Full persistence (MongoDB) + Advanced features (Tiers, Batching, Auto-Delete)
+// FIX: Imports adjusted for compatibility with "type": "module" deployment.
 // =========================================================================
 
 // ----------------------------------------------------------------------
@@ -444,8 +444,6 @@ async function getFileDetailsForWeb(uniqueId) {
 // 6. TELEGRAM BOT HANDLERS & STATE MACHINE
 // ----------------------------------------------------------------------
 
-// ... (Rest of the bot logic, mirroring the previous large response but using the new DB helpers)
-
 // Start command
 bot.onText(/\/start/, async (msg) => {
     const userId = msg.from.id;
@@ -563,7 +561,7 @@ bot.on('message', async (msg) => {
                 const webLink = `${WEBAPP_URL}/file/${uniqueId}`; 
                 const directLink = `${WEBAPP_URL}/direct/${uniqueId}`; 
 
-                await sendOrEditMessage(chatId, `✅ <b>${toSmallCaps('Permanent Web & Telegram Link Generated!')}</b>\n\n${toSmallCaps('File Name')}: <code>${fileName}</code>\n${toSmallCaps('File Size')}: ${formatFileSize(fileSize)}`, {
+                await sendOrEditMessage(chatId, `✅ <b>${toSmallCaps('Permanent Web & Telegram Link Generated!')}</b>\n\n${toSmallCaps('File Name')}: <code>${file.file_name || msg.caption || `File ${uniqueId}`}</code>\n${toSmallCaps('File Size')}: ${formatFileSize(fileSize)}`, {
                     inline_keyboard: [
                         [{ text: toSmallCaps('🔗 Stream/Download (Web)'), url: webLink }],
                         [{ text: toSmallCaps('⬇️ Direct Link (Telegram)'), url: directLink }]
@@ -639,7 +637,8 @@ bot.on('message', async (msg) => {
             await addFile({
                 uniqueId,
                 type: 'sequential_batch', 
-                sourceChatId: sourceChatId.toString(),
+                chatId: sourceChatId,
+                messageId: startId, // Store start ID as message ID for reference
                 startId,
                 endId,
                 fileName: `Batch: ${fileName}`,
@@ -820,7 +819,9 @@ bot.onText(/\/files/, async (msg) => {
     } else {
         files.forEach((file, index) => {
             const fileType = file.type.split('_')[0].toUpperCase();
-            const link = `${WEBAPP_URL}/file/${file.uniqueId}`;
+            // Use /direct for forward/batch links, /file for single files
+            const linkPath = file.type === 'single_file' ? 'file' : 'direct'; 
+            const link = `${WEBAPP_URL}/${linkPath}/${file.uniqueId}`;
             
             fileListText += `${index + 1}. <b>${file.fileName.substring(0, 40)}</b>... [${fileType}] (<a href="${link}">Open Link</a>)\n`;
             fileListText += `   👁️ ${file.views || 0} views | 💾 ${formatFileSize(file.fileSize || 0)}\n`;
@@ -830,7 +831,81 @@ bot.onText(/\/files/, async (msg) => {
     await sendOrEditMessage(msg.chat.id, fileListText);
 });
 
+bot.onText(/\/help/, async (msg) => {
+    const helpText = `
+🆘 <b>${toSmallCaps('Bot Help & Commands (v13)')}</b>
+
+${toSmallCaps('Core Functions:')}
+• <code>/start</code> - Main menu, clears state, shows current tier.
+• <code>/getlink</code> - Generate a link for a single file/message (forward content).
+• <code>/stats</code> - Display your current tier, limits, and file count.
+• <code>/files</code> - List your latest uploaded links.
+• <code>/help</code> - Display this help text.
+• <code>/cancel</code> - Abort current multi-step process.
+
+${toSmallCaps('Link Types:')}
+• <b>Streamable Link</b>: Web link for video streaming and download (/file/:id).
+• <b>Direct Link</b>: Telegram link to receive content in the bot (/direct/:id).
+    `;
+
+    const user = await getUser(msg.from.id);
+    if (getUserTier(user).name === 'ADMIN') {
+        helpText += `
+\n${toSmallCaps('Admin-Only Commands (Batch & Management):')}
+• <code>/status</code> - View global bot statistics.
+• <code>/batch</code> - Generate a <b>sequential link</b> (forward start/end posts).
+• <code>/custom_batch</code> - Start collecting files for a <b>custom batch</b>.
+• <code>/done &lt;Title&gt;</code> - Finalize /custom_batch and generate the link.
+• <code>/ban &lt;ID&gt;</code>, <code>/unban &lt;ID&gt;</code> - Manage user access.
+• <code>/deletefile &lt;ID&gt;</code> - Delete a file/link by its unique ID.
+        `;
+    }
+
+    await sendOrEditMessage(msg.chat.id, helpText);
+});
+
+bot.onText(/\/cancel/, async (msg) => {
+    const userId = msg.from.id;
+    if (!USER_STATE.has(userId)) return sendOrEditMessage(userId, toSmallCaps('⚠️ No active operation to cancel.'));
+
+    USER_STATE.delete(userId);
+    await sendOrEditMessage(userId, toSmallCaps('✅ Current multi-step operation cancelled. State reset.'));
+});
+
+
 // Admin commands (Using new DB helpers)
+
+bot.onText(/\/status/, async (msg) => {
+    const userId = msg.from.id;
+    if (getUserTier(await getUser(userId)).name !== 'ADMIN') return;
+    
+    let totalUsers, totalFiles;
+    if (DATABASE_URL) {
+        totalUsers = await User.countDocuments({});
+        totalFiles = await File.countDocuments({});
+    } else {
+        totalUsers = MEMORY_DATABASE.users.size;
+        totalFiles = MEMORY_DATABASE.files.size;
+    }
+
+    const uptimeSeconds = (performance.now() - START_TIME) / 1000;
+    const hours = Math.floor(uptimeSeconds / 3600);
+    const minutes = Math.floor((uptimeSeconds % 3600) / 60);
+    const seconds = Math.floor(uptimeSeconds % 60);
+    const uptime = `${hours}h ${minutes}m ${seconds}s`;
+
+    const statusText = `
+⚙️ <b>${toSmallCaps('Bot Status & Analytics')}</b>
+
+${toSmallCaps('Uptime')}: ${uptime}
+${toSmallCaps('Total Registered Users')}: ${totalUsers}
+${toSmallCaps('Total Created Links')}: ${totalFiles}
+${toSmallCaps('Links in Cache')}: ${URL_CACHE.size}
+${toSmallCaps('Pending State Operations')}: ${USER_STATE.size}
+    `;
+
+    await sendOrEditMessage(msg.chat.id, statusText);
+});
 
 bot.onText(/\/ban (.+)/, async (msg, match) => {
     const userId = msg.from.id;
@@ -867,8 +942,6 @@ bot.onText(/\/deletefile (.+)/, async (msg, match) => {
         await sendOrEditMessage(msg.chat.id, `❌ ${toSmallCaps('File with ID')} <code>${fileIdToDelete}</code> ${toSmallCaps('not found in database.')}`);
     }
 });
-
-// ... (Other command handlers like /cancel, /how_to_use, /status)
 
 // Deep Link Handler (for /direct/:id links)
 async function handleDeepLink(msg, match) {
@@ -921,8 +994,6 @@ ${toSmallCaps('The content will now be delivered below.')}
 // 7. EXPRESS WEB SERVER LOGIC (Core Streaming/Download Infrastructure)
 // ----------------------------------------------------------------------
 
-// ... (Web server logic identical to the previous large code, but using getFileDetailsForWeb/updateFileStats helpers)
-
 app.use(express.json());
 
 // Set CORS headers
@@ -950,24 +1021,45 @@ app.get('/file/:id', async (req, res) => {
         const htmlContent = `
 <!DOCTYPE html>
 <html><head><title>${file.fileName}</title>
-<style>/* ... verbose CSS styles ... */</style>
+<style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; text-align: center; padding-top: 80px; background: #f8f9fa; color: #343a40; margin: 0; }
+    .container { background: #ffffff; padding: 40px; border-radius: 12px; max-width: 480px; margin: auto; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+    h1 { color: #007bff; font-size: 1.8rem; margin-bottom: 15px; }
+    p { font-size: 1.1rem; margin-bottom: 25px; }
+    .button-group { display: flex; justify-content: space-around; flex-wrap: wrap; margin-top: 30px; }
+    a { 
+        padding: 12px 25px; margin: 10px; border: none; border-radius: 6px; cursor: pointer; 
+        font-size: 1.05rem; font-weight: bold; transition: all 0.3s ease; box-shadow: 0 4px 6px rgba(0,0,0,0.1); 
+        min-width: 150px; text-decoration: none; display: inline-block;
+    }
+    .button-group a:first-child { background-color: #28a745; color: white; }
+    .button-group a:last-child { background-color: #007bff; color: white; }
+</style>
 </head>
 <body>
     <div class="container">
         <h1>${file.fileName}</h1>
         <p>File Size: <b>${fileSizeMB}</b></p>
+        <p>File Type: <i>${file.mimeType}</i></p>
         <div class="button-group">
             <a href="/stream/${file.uniqueId}" target="_blank">▶️ Stream Video</a>
             <a href="/download/${file.uniqueId}" target="_blank">⬇️ Direct Download</a>
         </div>
+        <small style="display: block; margin-top: 20px; color: #6c757d;">
+            Streaming supports HTTP Range requests for seeking.
+        </small>
     </div>
+    <footer style="margin-top: 40px; color: #adb5bd; font-size: 0.85rem;">
+        Permanent Link Service provided by ${BOT_INFO ? BOT_INFO.username : 'YourBot'}.
+    </footer>
 </body></html>
         `;
         return res.status(200).send(htmlContent);
     }
     
     // Redirect batch/forward links to the bot
-    const deepLink = `https://t.me/${BOT_INFO ? BOT_INFO.username : 'bot'}?start=${file.type.split('_')[0]}_${uniqueId}`;
+    const linkType = file.type.split('_')[0];
+    const deepLink = `https://t.me/${BOT_INFO ? BOT_INFO.username : 'bot'}?start=${linkType}_${uniqueId}`;
     res.redirect(302, deepLink);
 });
 
