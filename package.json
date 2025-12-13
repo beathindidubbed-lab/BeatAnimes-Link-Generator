@@ -1,18 +1,17 @@
 {
-  "name": "beatanimes-link-bot",
-  "version": "2.0.0",
-  "description": "Advanced Telegram permanent link generator",
+  "name": "ultimate-telegram-bot",
+  "version": "1.0.0",
+  "description": "A feature-rich, persistent Telegram permanent link generator.",
   "main": "bot.js",
   "type": "module",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
-    "node-telegram-bot-api": "^0.66.0",
+    "node-telegram-bot-api": "^0.64.0",
     "express": "^4.18.2",
-    "node-fetch": "^3.3.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "node-fetch": "^3.3.2",
+    "mongoose": "^8.0.3",
+    "axios": "^1.6.5"
   }
 }
