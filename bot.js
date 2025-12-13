@@ -1,26 +1,29 @@
 // ============================================
-// ULTIMATE TELEGRAM PERMANENT LINK BOT (V4 - ALL FEATURES & FIXES)
-// INCLUDES: Small Caps Style, Multi-Channel Force Sub, Full Admin Panel (Broadcast, Stats, Cleanup, Channel Management),
-//           Streaming/Download Links (Range Support), Robust Welcome Photo Handling.
+// ULTIMATE TELEGRAM PERMANENT LINK BOT (V6 - WITH BATCH LINKS)
+// INCLUDES: Small Caps Style, Multi-Channel Force Sub, Batch/Sequential Links,
+//          Full Admin Panel, Streaming/Download Links, Copy Message Welcome
 // ============================================
 
 import TelegramBot from 'node-telegram-bot-api';
 import express from 'express';
-import fetch from 'node-fetch';
+import fetch from 'node-fetch'; // Used for fetching files from Telegram URL
 
 // ============================================
 // CONFIGURATION & INITIALIZATION
 // ============================================
+// Ensure environment variables are set
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBAPP_URL = process.env.WEBAPP_URL || 'https://your-app.onrender.com';
 const PORT = process.env.PORT || 3000;
 
 // Admin Configuration
-// Use a comma-separated list of IDs for ADMIN_IDS environment variable
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id)) : [];
-// IMPORTANT: This must be a long, valid Telegram file_id (not '98' as you used before)
-const WELCOME_PHOTO_ID = process.env.WELCOME_PHOTO_ID || null; 
-const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME || '@YourChannel'; 
+
+// Welcome message settings
+const WELCOME_SOURCE_CHANNEL = process.env.WELCOME_SOURCE_CHANNEL || null;
+const WELCOME_SOURCE_MESSAGE_ID = process.env.WELCOME_SOURCE_MESSAGE_ID ? parseInt(process.env.WELCOME_SOURCE_MESSAGE_ID) : null;
+const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME || '@YourChannel';
+const ADMIN_CONTACT_USERNAME = process.env.ADMIN_CONTACT_USERNAME || 'YourAdmin';
 
 if (!BOT_TOKEN) {
     console.error('❌ BOT_TOKEN is required! Please set the BOT_TOKEN environment variable.');
@@ -30,46 +33,55 @@ if (!BOT_TOKEN) {
 // ============================================
 // DATABASE & STATE (In-memory storage)
 // ============================================
-const FILE_DATABASE = new Map(); 
-const USER_DATABASE = new Map(); 
-const URL_CACHE = new Map(); 
-const URL_CACHE_DURATION = 23 * 60 * 60 * 1000; // 23 hours cache duration for Telegram file URLs
-const USER_STATE = new Map(); // Tracks multi-step admin actions (e.g., adding channel, broadcasting)
+const FILE_DATABASE = new Map(); // Stores single files
+const BATCH_DATABASE = new Map(); // Stores batch links
+const USER_DATABASE = new Map();
+const URL_CACHE = new Map();
+const URL_CACHE_DURATION = 23 * 60 * 60 * 1000; // 23 hours
+const USER_STATE = new Map(); // Tracks multi-step admin actions
 
 // Global mutable config (Force Sub Channels)
 const CONFIG_STATE = {
-    FORCE_SUB_CHANNEL_IDS: process.env.MANDATORY_CHANNEL_IDS 
+    FORCE_SUB_CHANNEL_IDS: process.env.MANDATORY_CHANNEL_IDS
         ? process.env.MANDATORY_CHANNEL_IDS.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id))
         : []
 };
 
-// Cache for channel details (title, username)
-const CHANNEL_DETAILS_CACHE = new Map(); 
+// Cache for channel details
+const CHANNEL_DETAILS_CACHE = new Map();
 
 // Analytics
 const ANALYTICS = {
     totalViews: 0,
     totalDownloads: 0,
     totalFiles: 0,
+    totalBatches: 0,
     totalUsers: 0,
     startTime: Date.now()
 };
 
 // ============================================
 // TELEGRAM BOT INITIALIZATION
-// FIX: Use polling: true for simple deployment, or switch to webhook entirely
 // ============================================
-const bot = new TelegramBot(BOT_TOKEN, { 
-    polling: true // Use polling for stability unless deploying a dedicated webhook server
+const bot = new TelegramBot(BOT_TOKEN, {
+    polling: true
 });
 
-console.log('✅ Bot started successfully!');
+// Get bot info for later use
+let BOT_INFO = null;
+bot.getMe().then(info => {
+    BOT_INFO = info;
+    console.log(`✅ Bot started successfully! @${info.username} (ID: ${info.id})`);
+}).catch(err => {
+    console.error('❌ Failed to get bot info:', err);
+});
 
-// Set up bot commands for the Telegram menu
+// Set up bot commands
 bot.setMyCommands([
     { command: 'start', description: 'Start the bot and open the main menu' },
     { command: 'stats', description: 'Check your usage statistics' },
     { command: 'files', description: 'View and manage your uploaded files' },
+    { command: 'batch', description: 'Create batch/sequential links' },
     { command: 'admin', description: 'Open the admin control panel (Admins only)' },
 ]).then(() => console.log('✅ Telegram commands set.'));
 
@@ -77,17 +89,14 @@ bot.setMyCommands([
 // CORE UTILITY FUNCTIONS
 // ============================================
 
-/**
- * Converts text to a Small Caps style using Unicode characters.
- * FIX: This function was missing in your previous file.
- */
 function toSmallCaps(text) {
     const map = {
         'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ғ', 'g': 'ɢ', 'h': 'ʜ', 'i': 'ɪ',
         'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ', 'm': 'ᴍ', 'n': 'ɴ', 'o': 'ᴏ', 'p': 'ᴘ', 'q': 'ǫ', 'r': 'ʀ',
         's': 's', 't': 'ᴛ', 'u': 'ᴜ', 'v': 'ᴠ', 'w': 'ᴡ', 'x': 'x', 'y': 'ʏ', 'z': 'ᴢ',
-        ' ': ' ' 
+        ' ': ' '
     };
+    if (typeof text !== 'string') return text; // Handle non-string inputs gracefully
     return text.toLowerCase().split('').map(char => map[char] || char).join('');
 }
 
@@ -115,8 +124,9 @@ function registerUser(userId, username, firstName) {
 }
 
 function generateUniqueId() {
-    return Math.random().toString(36).substring(2, 15) + 
-           Math.random().toString(36).substring(2, 15);
+    // Generate a reasonably unique 26-character ID
+    return Math.random().toString(36).substring(2, 15) +
+        Math.random().toString(36).substring(2, 15);
 }
 
 function formatFileSize(bytes) {
@@ -124,13 +134,13 @@ function formatFileSize(bytes) {
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+    return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
 }
 
 function formatDate(timestamp) {
     const date = new Date(timestamp);
-    return date.toLocaleDateString('en-US', { 
-        month: 'short', 
+    return date.toLocaleDateString('en-US', {
+        month: 'short',
         day: 'numeric',
         year: 'numeric'
     });
@@ -141,12 +151,12 @@ function formatDuration(ms) {
     const minutes = Math.floor(seconds / 60);
     const hours = Math.floor(minutes / 60);
     const days = Math.floor(hours / 24);
-    
+
     let parts = [];
     if (days > 0) parts.push(`${days}d`);
     if (hours % 24 > 0) parts.push(`${hours % 24}h`);
     if (minutes % 60 > 0) parts.push(`${minutes % 60}m`);
-    
+
     return parts.length > 0 ? parts.join(' ') : '<1m';
 }
 
@@ -154,26 +164,26 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/**
- * Utility function to get a fresh, temporary file URL from Telegram
- */
 async function getFreshFileUrl(fileData) {
     const cacheKey = fileData.fileId;
     const cached = URL_CACHE.get(cacheKey);
-    
+
     if (cached && (Date.now() - cached.timestamp) < URL_CACHE_DURATION) {
         return cached.url;
     }
-    
+
     try {
         const fileInfo = await bot.getFile(fileData.fileId);
+        if (!fileInfo.file_path) {
+             throw new Error("File path is undefined, Telegram may have expired the file.");
+        }
         const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.file_path}`;
-        
+
         URL_CACHE.set(cacheKey, {
             url: fileUrl,
             timestamp: Date.now()
         });
-        
+
         return fileUrl;
     } catch (error) {
         console.error('❌ Error getting file URL from Telegram:', error);
@@ -182,10 +192,8 @@ async function getFreshFileUrl(fileData) {
     }
 }
 
-
 // ============================================
-// FEATURE: MULTI-CHANNEL FORCE SUBSCRIPTION LOGIC
-// FIX: This entire section was missing in your previous file.
+// FORCE SUBSCRIPTION LOGIC
 // ============================================
 
 async function getChannelDetails(channelId) {
@@ -199,411 +207,524 @@ async function getChannelDetails(channelId) {
         CHANNEL_DETAILS_CACHE.set(channelId, details);
         return details;
     } catch (e) {
-        // Log, but proceed with error flag
         console.error(`Error fetching chat details for ${channelId}: ${e.message}`);
         return { title: `Unknown Channel (${channelId})`, username: null, id: channelId, error: true };
     }
 }
 
-/**
- * Checks membership for all required channels.
- */
-async function checkAllMemberships(userId) {
-    const channelIds = CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.filter(id => id); 
-    if (channelIds.length === 0) return { isMember: true, requiredChannels: [] };
+async function checkForceSubscription(userId) {
+    if (CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.length === 0) {
+        return { required: false, channels: [] };
+    }
 
     const requiredChannels = [];
-    let isSubscribedToAll = true;
+    let isSubscribed = true;
 
-    for (const id of channelIds) {
-        const details = await getChannelDetails(id);
-        requiredChannels.push({ id, ...details });
-        
-        if (details.error) {
-            isSubscribedToAll = false;
-            continue; 
-        }
-
+    for (const channelId of CONFIG_STATE.FORCE_SUB_CHANNEL_IDS) {
         try {
-            const member = await bot.getChatMember(id, userId);
-            if (member.status === 'left' || member.status === 'kicked') {
-                isSubscribedToAll = false;
+            const memberStatus = await bot.getChatMember(channelId, userId);
+            const status = memberStatus.status;
+
+            if (status !== 'member' && status !== 'administrator' && status !== 'creator') {
+                const details = await getChannelDetails(channelId);
+                requiredChannels.push(details);
+                isSubscribed = false;
             }
         } catch (e) {
-             isSubscribedToAll = false; 
+            console.error(`Error checking sub for ${channelId}: ${e.message}`);
+            // If the bot isn't an admin/member, this throws an error. We treat this as "required" but may be unjoinable.
+            const details = await getChannelDetails(channelId);
+            requiredChannels.push(details);
+            isSubscribed = false;
         }
-        
-        if (!isSubscribedToAll) break; // Optimization
     }
-    
-    return { isMember: isSubscribedToAll, requiredChannels };
+
+    return { required: !isSubscribed, channels: requiredChannels };
 }
 
-function getForceJoinKeyboard(requiredChannels) {
-    const keyboard = [];
-    
-    for (const ch of requiredChannels) {
-        // Creates an invite link
-        const url = ch.username ? `https://t.me/${ch.username.replace('@', '')}` : `tg://join?invite=${ch.id.toString().substring(4)}`; 
-        
-        keyboard.push([{ text: `📢 ${toSmallCaps(ch.title)}`, url: url }]);
-    }
-    
-    keyboard.push([{ text: toSmallCaps('✅ Click to continue'), callback_data: 'verify_subscription' }]);
-    
-    return { inline_keyboard: keyboard };
-}
-
-
-/**
- * Central function to check for force subscription and intercept execution if failed.
- */
-async function forceSubCheckAndIntercept(msg, action) {
+async function forceSubRequired(msg, action) {
     const userId = msg.from.id;
     const chatId = msg.chat.id;
-    
+
     if (isAdmin(userId)) {
-        await action();
-        return true; 
+        return action();
     }
 
-    const { isMember, requiredChannels } = await checkAllMemberships(userId);
-    
-    if (isMember) {
-        await action();
-        return true; 
+    const subCheck = await checkForceSubscription(userId);
+
+    if (subCheck.required) {
+        const channelList = subCheck.channels.map((c, i) =>
+            `${i + 1}. **${toSmallCaps(c.title)}** ${c.username ? `(${c.username})` : toSmallCaps('(Private)')}`
+        ).join('\n');
+
+        const inlineKeyboard = subCheck.channels.map(c => ([
+            { text: toSmallCaps(`🔗 Join ${c.title.substring(0, 20)}...`), url: c.username ? `https://t.me/${c.username.substring(1)}` : `https://t.me/${CHANNEL_USERNAME.substring(1)}` }
+        ]));
+
+        inlineKeyboard.push([{ text: toSmallCaps('🔄 I have joined!'), callback_data: 'check_sub' }]);
+
+        await bot.sendMessage(chatId,
+            `⚠️ <b>${toSmallCaps('Subscription Required')}</b>\n\n` +
+            `${toSmallCaps('Please join the following channels to use the bot:')}\n\n` +
+            channelList,
+            {
+                parse_mode: 'HTML',
+                reply_to_message_id: msg.message_id,
+                reply_markup: {
+                    inline_keyboard: inlineKeyboard
+                }
+            }
+        );
     } else {
-        // Intercept: User is NOT a member, send prompt
-        const promptText = `
-⚠️ <b>${toSmallCaps('ACCESS DENIED - Join Required')}</b>
-
-${toSmallCaps('Hello')} ${msg.from.first_name}, ${toSmallCaps('to use this bot\'s features, you must first join all of our mandatory channels listed below.')}
-
-${toSmallCaps('Please join')} **${toSmallCaps('ALL')}** ${toSmallCaps('channels and then click the')} '${toSmallCaps('Click to continue')}' ${toSmallCaps('button.')}
-        `;
-        
-        // Delete original message if it's a file upload/command to prevent processing
-        if (msg.photo || msg.video || msg.document || (msg.text && msg.text.startsWith('/'))) {
-             try { await bot.deleteMessage(chatId, msg.message_id); } catch (e) { /* Ignore */ }
-        }
-
-        await bot.sendMessage(chatId, promptText, {
-            parse_mode: 'HTML',
-            reply_markup: getForceJoinKeyboard(requiredChannels)
-        });
-        return false;
+        return action();
     }
 }
 
 // ============================================
-// KEYBOARD LAYOUTS (Styled)
+// KEYBOARD & MESSAGE HELPERS
 // ============================================
 
-function getMainKeyboard(isAdmin = false) {
+function getMainMenuKeyboard(userId) {
     const keyboard = [
-        [
-            { text: toSmallCaps('📊 My Stats'), callback_data: 'my_stats' },
-            { text: toSmallCaps('📁 My Files'), callback_data: 'my_files' }
-        ],
-        [
-            { text: toSmallCaps('📖 How to Use'), callback_data: 'help' },
-            { text: toSmallCaps('📢 Channel'), url: `https://t.me/${CHANNEL_USERNAME.replace('@', '')}` }
-        ]
+        [{ text: toSmallCaps('📁 My Files'), callback_data: 'my_files' }, { text: toSmallCaps('📦 Create Batch'), callback_data: 'create_batch' }],
+        [{ text: toSmallCaps('📊 Stats'), callback_data: 'my_stats' }, { text: toSmallCaps('❓ Help'), callback_data: 'help' }],
     ];
-    
-    if (isAdmin) {
-        keyboard.push([
-            { text: toSmallCaps('👑 Admin Panel'), callback_data: 'admin_panel' }
-        ]);
+    if (isAdmin(userId)) {
+        keyboard.push([{ text: toSmallCaps('👑 Admin Panel'), callback_data: 'admin_panel' }]);
     }
-    
     return { inline_keyboard: keyboard };
 }
 
 function getAdminKeyboard() {
     return {
         inline_keyboard: [
-            [
-                { text: toSmallCaps('📊 Bot Statistics'), callback_data: 'admin_stats' },
-                { text: toSmallCaps(`🔗 Manage Channels (${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.length})`), callback_data: 'admin_list_channels' }
-            ],
-            [
-                { text: toSmallCaps('📢 Universal Broadcast'), callback_data: 'admin_broadcast_start' },
-                { text: toSmallCaps('🗑️ Cleanup Cache'), callback_data: 'admin_clean' }
-            ],
-            [
-                { text: toSmallCaps('🔙 Back to Main'), callback_data: 'start' }
-            ]
+            [{ text: toSmallCaps('📊 Global Stats'), callback_data: 'admin_stats' }],
+            [{ text: toSmallCaps('🔗 Mandatory Channels'), callback_data: 'admin_list_channels' }],
+            [{ text: toSmallCaps('📢 Broadcast Message'), callback_data: 'admin_broadcast_start' }],
+            [{ text: toSmallCaps('🗑️ Clean URL Cache'), callback_data: 'admin_clean' }],
+            [{ text: toSmallCaps('🔙 Back to Main Menu'), callback_data: 'start' }]
         ]
     };
 }
 
+async function editMessage(text, replyMarkup = {}, preventNotFound = false) {
+    const { chatId, messageId } = replyMarkup;
+    try {
+        await bot.editMessageText(text, {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: replyMarkup.inline_keyboard ? replyMarkup : undefined,
+            parse_mode: 'HTML'
+        });
+    } catch (e) {
+        if (preventNotFound && e.message.includes('message is not modified')) {
+            // Ignore if the message content hasn't changed
+            return;
+        }
+        if (preventNotFound && (e.message.includes('message to edit not found') || e.message.includes('message can\'t be edited'))) {
+            // Ignore if the message was deleted or can't be edited
+            return;
+        }
+        console.error('Error editing message:', e.message);
+    }
+}
+
+
 // ============================================
-// BOT COMMANDS - START & ADMIN
+// COMMAND HANDLERS
 // ============================================
 
-async function handleStartCommand(msg) {
-    const chatId = msg.chat.id;
+bot.onText(/\/start (.+)/, async (msg, match) => {
     const userId = msg.from.id;
-    const username = msg.from.username;
-    const firstName = msg.from.first_name;
-    
-    registerUser(userId, username, firstName);
-    
+    const chatId = msg.chat.id;
+    const payload = match[1];
+
+    registerUser(userId, msg.from.username, msg.from.first_name);
+
     const action = async () => {
-        // FIX: Conditional rendering of global stats (if you only want admins to see them)
-        const globalStats = isAdmin(userId) ? `
-<b>👥 ${toSmallCaps('Users')}:</b> ${USER_DATABASE.size}
-<b>📁 ${toSmallCaps('Files')}:</b> ${FILE_DATABASE.size}
-<b>👁️ ${toSmallCaps('Total Views')}:</b> ${ANALYTICS.totalViews}
-` : '';
-        
-        const welcomeText = `
-🎬 <b>${toSmallCaps('Welcome to BeatAnimes Link Generator!')}</b>
+        const parts = payload.split('_');
+        const type = parts[0];
+        const uniqueId = parts[1];
+        let fileData, batchData;
+        let responseText = ``;
+        let keyboard = [[{ text: toSmallCaps('🔙 Main Menu'), callback_data: 'start' }]];
 
-${toSmallCaps(firstName)}, ${toSmallCaps('I\'m here to help you create')} <b>${toSmallCaps('permanent streaming links')}</b> ${toSmallCaps('for your videos! 🚀')}
+        if (type === 'file') {
+            fileData = FILE_DATABASE.get(uniqueId);
+            if (!fileData) {
+                responseText = `❌ <b>${toSmallCaps('File Not Found')}</b>\n\n${toSmallCaps('The requested file link is invalid or has expired.')}`;
+            } else {
+                ANALYTICS.totalViews++;
+                fileData.views++;
+                fileData.lastAccessed = Date.now();
 
-<b>✨ ${toSmallCaps('Features')}:</b>
-✅ ${toSmallCaps('Permanent links that never expire')}
-✅ ${toSmallCaps('Direct streaming support')}
-✅ ${toSmallCaps('Analytics and tracking')}
+                const streamLink = `${WEBAPP_URL}/stream/${uniqueId}`;
+                const downloadLink = `${WEBAPP_URL}/download/${uniqueId}`;
 
-<b>🎯 ${toSmallCaps('Quick Start')}:</b>
-${toSmallCaps('Just send me any video file, and I\'ll generate a permanent link instantly!')}
+                responseText = `
+✅ <b>${toSmallCaps('File Details')}</b>
 
-${globalStats}
+📁 <b>${toSmallCaps('Name')}:</b> ${fileData.fileName}
+💾 <b>${toSmallCaps('Size')}:</b> ${formatFileSize(fileData.fileSize)}
+👁️ <b>${toSmallCaps('Views')}:</b> ${fileData.views}
 
-${toSmallCaps('Join our channel')}: ${CHANNEL_USERNAME}
-        `;
-        
-        const keyboard = getMainKeyboard(isAdmin(userId));
-        
-        if (WELCOME_PHOTO_ID) {
-            try {
-                // Try to send photo + caption
-                await bot.sendPhoto(chatId, WELCOME_PHOTO_ID, {
-                    caption: welcomeText,
-                    parse_mode: 'HTML',
-                    reply_markup: keyboard
-                });
-            } catch (error) {
-                // FIX: Fall back to text if photo fails (e.g., bad ID - your case)
-                console.error('❌ Failed to send welcome photo. Falling back to text.', error.message);
-                await bot.sendMessage(chatId, welcomeText, { 
-                    parse_mode: 'HTML', 
-                    reply_markup: keyboard 
-                });
+${toSmallCaps('Use the buttons below to access the file.')}
+                `;
+                keyboard = [
+                    [{ text: toSmallCaps('📺 Stream'), url: streamLink }, { text: toSmallCaps('⬇️ Download'), url: downloadLink }],
+                    [{ text: toSmallCaps('🔙 Main Menu'), callback_data: 'start' }]
+                ];
+            }
+
+        } else if (type === 'batch' || type === 'forward' || type === 'sequential' || type === 'custom') {
+            batchData = BATCH_DATABASE.get(uniqueId);
+            if (!batchData) {
+                responseText = `❌ <b>${toSmallCaps('Batch Not Found')}</b>\n\n${toSmallCaps('The requested batch link is invalid or has expired.')}`;
+            } else {
+                ANALYTICS.totalViews++;
+                batchData.views++;
+                batchData.lastAccessed = Date.now();
+
+                const typeLabel = (type === 'forward' || type === 'single_forward') ? 'Single Forward' : (type === 'sequential') ? 'Sequential' : 'Custom';
+                const fileCount = batchData.messageIds.length;
+
+                // Send the files/messages
+                for (let i = 0; i < batchData.messageIds.length; i++) {
+                    const messageId = batchData.messageIds[i];
+                    try {
+                        await bot.copyMessage(chatId, batchData.fromChatId, messageId);
+                        await sleep(500); // Telegram API rate limit mitigation
+                    } catch (e) {
+                        console.error(`Failed to copy message ${messageId}: ${e.message}`);
+                    }
+                }
+
+                responseText = `
+✅ <b>${toSmallCaps('Batch Sent!')}</b>
+
+📦 <b>${toSmallCaps('Type')}:</b> ${toSmallCaps(typeLabel)}
+📋 <b>${toSmallCaps('Messages')}:</b> ${fileCount}
+
+${toSmallCaps('The files/messages have been sent to you above.')}
+                `;
             }
         } else {
-            // Send text if no photo ID is set
-            await bot.sendMessage(chatId, welcomeText, {
+            responseText = `❌ <b>${toSmallCaps('Invalid Link Type')}</b>`;
+        }
+
+        await bot.sendMessage(chatId, responseText, {
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: keyboard }
+        });
+    };
+
+    await forceSubRequired(msg, action);
+});
+
+bot.onText(/\/start|\/admin|\/stats|\/files|\/batch/, async (msg, match) => {
+    const userId = msg.from.id;
+    const chatId = msg.chat.id;
+    const command = match[0];
+    registerUser(userId, msg.from.username, msg.from.first_name);
+
+    const action = async () => {
+        if (command === '/admin' && !isAdmin(userId)) {
+            return bot.sendMessage(chatId, `❌ ${toSmallCaps('Unauthorized.')}`);
+        }
+
+        let welcomeMessage = `
+👋 <b>${toSmallCaps('Welcome to Link Generator!')}</b>
+
+${toSmallCaps('I can help you create permanent, direct streaming and batch links for your Telegram files.')}
+
+<b>${toSmallCaps('How to use')}:</b>
+1️⃣ ${toSmallCaps('Send me a file (Video, Doc, Photo).')}
+2️⃣ ${toSmallCaps('I send you a permanent link.')}
+
+${toSmallCaps('Use the menu below to explore features.')}
+        `;
+
+        // Check for Copy Message Welcome Source
+        if (WELCOME_SOURCE_CHANNEL && WELCOME_SOURCE_MESSAGE_ID) {
+            try {
+                await bot.copyMessage(chatId, WELCOME_SOURCE_CHANNEL, WELCOME_SOURCE_MESSAGE_ID);
+                welcomeMessage = `
+👋 <b>${toSmallCaps('Welcome to Link Generator!')}</b>
+${toSmallCaps('The welcome message has been sent above. Use the menu below to explore features.')}
+                `;
+            } catch (e) {
+                console.error('Error copying welcome message:', e.message);
+                // Fallback to default message
+            }
+        }
+
+        if (command === '/admin' && isAdmin(userId)) {
+            await bot.sendMessage(chatId, `👑 <b>${toSmallCaps('Admin Panel')}</b>\n\n${toSmallCaps('Welcome Admin! Choose an option below')}:`, { parse_mode: 'HTML', reply_markup: getAdminKeyboard() });
+        } else if (command === '/stats') {
+            // Re-use logic from callback query
+            const userData = USER_DATABASE.get(userId);
+            const statsText = `
+📊 <b>${toSmallCaps('Your Statistics')}</b>
+
+👤 <b>${toSmallCaps('Joined')}:</b> ${formatDate(userData.joinedAt)}
+📤 <b>${toSmallCaps('Total Uploads')}:</b> ${userData.totalUploads}
+📄 <b>${toSmallCaps('Active Files')}:</b> ${Array.from(FILE_DATABASE.values()).filter(f => f.uploadedBy === userId).length}
+📦 <b>${toSmallCaps('Active Batches')}:</b> ${Array.from(BATCH_DATABASE.values()).filter(b => b.createdBy === userId).length}
+
+${toSmallCaps('Keep generating links!')}
+        `;
+            await bot.sendMessage(chatId, statsText, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'start' }]] } });
+
+        } else if (command === '/files' || command === '/batch') {
+            // Force /files or /batch logic via callback
+            const data = command === '/files' ? 'my_files' : 'create_batch';
+            await handleCallbackQuery({ id: 'dummy', from: { id: userId }, message: { chat: { id: chatId }, message_id: msg.message_id + 1 } }, data);
+        } else {
+            await bot.sendMessage(chatId, welcomeMessage, {
                 parse_mode: 'HTML',
-                reply_markup: keyboard
+                reply_markup: getMainMenuKeyboard(userId)
             });
         }
     };
 
-    // Use the interceptor for the /start command
-    await forceSubCheckAndIntercept(msg, action);
-}
-
-// Command Handlers (using bot.onText for command stability)
-bot.onText(/\/start/, handleStartCommand);
-// FIX: /stats and /files now use handleStartCommand to ensure Force Sub check and correct menu display
-bot.onText(/\/stats/, (msg) => handleStartCommand(msg)); 
-bot.onText(/\/files/, (msg) => handleStartCommand(msg)); 
-
-bot.onText(/\/admin/, async (msg) => { 
-    if (isAdmin(msg.from.id)) {
-        await bot.sendMessage(msg.chat.id, `👑 <b>${toSmallCaps('Admin Panel')}</b>\n\n${toSmallCaps('Welcome Admin! Choose an option below')}:`, {
-            parse_mode: 'HTML',
-            reply_markup: getAdminKeyboard()
-        });
+    if (command !== '/admin') {
+        await forceSubRequired(msg, action);
     } else {
-        await bot.sendMessage(msg.chat.id, toSmallCaps('❌ You are not authorized!'));
+        await action();
     }
 });
 
 
 // ============================================
-// CALLBACK QUERY HANDLER 
+// CALLBACK QUERY HANDLER
 // ============================================
 
 bot.on('callback_query', async (query) => {
-    const chatId = query.message.chat.id;
-    const userId = query.from.id;
     const data = query.data;
+    const userId = query.from.id;
+    const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
 
-    // Helper function for safe message editing
-    const editMessage = async (text, keyboard, disablePreview = false) => {
+    const editMessage = async (text, replyMarkup = {}) => {
         try {
             await bot.editMessageText(text, {
                 chat_id: chatId,
                 message_id: messageId,
-                parse_mode: 'HTML',
-                reply_markup: keyboard,
-                disable_web_page_preview: disablePreview
+                reply_markup: replyMarkup.inline_keyboard ? replyMarkup : undefined,
+                parse_mode: 'HTML'
             });
         } catch (e) {
-            // FIX: Robust error handling for message is not modified / message not found
-            if (!e.message.includes('message is not modified')) {
-                 try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
-                 await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: keyboard, disable_web_page_preview: disablePreview });
+            // Ignore "message is not modified" or "message to edit not found" errors
+            if (!e.message.includes('message is not modified') && !e.message.includes('message to edit not found')) {
+                console.error('Error editing message in callback:', e.message);
             }
         }
     };
-    
-    // --- FORCE SUB VERIFICATION HANDLER ---
-    if (data === 'verify_subscription') {
-        const { isMember, requiredChannels } = await checkAllMemberships(userId);
-        
-        if (isMember) {
-            try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
-            await handleStartCommand({ chat: { id: chatId }, from: query.from, text: '/start' });
-            return bot.answerCallbackQuery(query.id, { text: toSmallCaps('✅ Access Granted! Welcome!'), show_alert: true });
-        } else {
-            const promptText = `
-⚠️ <b>${toSmallCaps('ACCESS DENIED - Join Required')}</b>
 
-${toSmallCaps('You are still not a member of all required channels. Please join')} **${toSmallCaps('ALL')}** ${toSmallCaps('channels and then click the')} '${toSmallCaps('Click to continue')}' ${toSmallCaps('button.')}
-            `;
-            const keyboard = getForceJoinKeyboard(requiredChannels);
-            await editMessage(promptText, keyboard); 
-            return bot.answerCallbackQuery(query.id, { text: toSmallCaps('⚠️ Please join all channels listed above.'), show_alert: true });
+    if (data === 'check_sub') {
+        const subCheck = await checkForceSubscription(userId);
+
+        if (!subCheck.required) {
+            await editMessage(
+                `✅ <b>${toSmallCaps('Subscription Confirmed!')}</b>\n\n${toSmallCaps('Thank you for joining. You can now use the bot features.')}`,
+                getMainMenuKeyboard(userId)
+            );
+        } else {
+            const channelList = subCheck.channels.map((c, i) =>
+                `${i + 1}. **${toSmallCaps(c.title)}** ${c.username ? `(${c.username})` : toSmallCaps('(Private)')}`
+            ).join('\n');
+
+            const inlineKeyboard = subCheck.channels.map(c => ([
+                { text: toSmallCaps(`🔗 Join ${c.title.substring(0, 20)}...`), url: c.username ? `https://t.me/${c.username.substring(1)}` : `https://t.me/${CHANNEL_USERNAME.substring(1)}` }
+            ]));
+
+            inlineKeyboard.push([{ text: toSmallCaps('🔄 I have joined!'), callback_data: 'check_sub' }]);
+
+            await editMessage(
+                `⚠️ <b>${toSmallCaps('Subscription Required')}</b>\n\n${toSmallCaps('Please join the following channels to use the bot:')}\n\n` + channelList,
+                { inline_keyboard: inlineKeyboard }
+            );
         }
     }
 
+    else if (data === 'start') {
+        let welcomeMessage = `
+👋 <b>${toSmallCaps('Welcome to Link Generator!')}</b>
 
-    // --- Global Membership Check for All Other Callbacks ---
-    const { isMember } = await checkAllMemberships(userId);
-    if (!isMember && !isAdmin(userId) && data !== 'start') {
-        await bot.answerCallbackQuery(query.id, { text: toSmallCaps('⚠️ You must join the channel(s) to view this menu.'), show_alert: true });
-        return; 
+${toSmallCaps('I can help you create permanent, direct streaming and batch links for your Telegram files.')}
+
+<b>${toSmallCaps('How to use')}:</b>
+1️⃣ ${toSmallCaps('Send me a file (Video, Doc, Photo).')}
+2️⃣ ${toSmallCaps('I send you a permanent link.')}
+
+${toSmallCaps('Use the menu below to explore features.')}
+        `;
+        await editMessage(welcomeMessage, getMainMenuKeyboard(userId));
     }
 
-    // --- Core Handlers (User) ---
-    if (data === 'start') {
-        // Back to Start logic: delete old message and execute the full start command logic
-        try { await bot.deleteMessage(chatId, messageId); } catch (e) { /* Ignore */ }
-        // Re-use the full handler
-        await handleStartCommand({ chat: { id: chatId }, from: query.from, text: '/start' }); 
-        return bot.answerCallbackQuery(query.id); 
-    }
-    
-    // ... (my_stats, my_files, etc. logic here - fully implemented)
     else if (data === 'my_stats') {
-         const user = USER_DATABASE.get(userId);
-         let userFiles = 0;
-         let userViews = 0;
-         for (const file of FILE_DATABASE.values()) {
-             if (file.uploadedBy === userId) {
-                 userFiles++;
-                 userViews += file.views;
-             }
-         }
-            
+        const userData = USER_DATABASE.get(userId);
         const statsText = `
 📊 <b>${toSmallCaps('Your Statistics')}</b>
 
-👤 <b>${toSmallCaps('Name')}:</b> ${user.firstName}
-🆔 <b>${toSmallCaps('User ID')}:</b> <code>${userId}</code>
-📅 <b>${toSmallCaps('Joined')}:</b> ${formatDate(user.joinedAt)}
+👤 <b>${toSmallCaps('Joined')}:</b> ${formatDate(userData.joinedAt)}
+📤 <b>${toSmallCaps('Total Uploads')}:</b> ${userData.totalUploads}
+📄 <b>${toSmallCaps('Active Files')}:</b> ${Array.from(FILE_DATABASE.values()).filter(f => f.uploadedBy === userId).length}
+📦 <b>${toSmallCaps('Active Batches')}:</b> ${Array.from(BATCH_DATABASE.values()).filter(b => b.createdBy === userId).length}
 
-📁 <b>${toSmallCaps('Total Files')}:</b> ${userFiles}
-👁️ <b>${toSmallCaps('Total Views')}:</b> ${userViews}
-
-${toSmallCaps('Keep sharing videos! 🚀')}
+${toSmallCaps('Keep generating links!')}
         `;
-            
         await editMessage(statsText, { inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'start' }]] });
     }
-    
+
     else if (data === 'my_files') {
-        let fileList = `📁 <b>${toSmallCaps('Your Files (Last 10)')}:</b>\n\n`;
-        let count = 0;
+        const userFiles = Array.from(FILE_DATABASE.values())
+            .filter(f => f.uploadedBy === userId)
+            .sort((a, b) => b.createdAt - a.createdAt) // Sort newest first
+            .slice(0, 10); // Show only the latest 10
+
+        let fileList = '';
+        let count = Array.from(FILE_DATABASE.values()).filter(f => f.uploadedBy === userId).length;
         const buttons = [];
-        
-        for (const [id, file] of Array.from(FILE_DATABASE.entries()).reverse()) { // Show most recent first
-            if (file.uploadedBy === userId) {
-                count++;
-                if (count <= 10) {
-                    fileList += `${count}. ${toSmallCaps(file.fileName.substring(0, 30))}...\n`;
-                    fileList += `   👁️ ${file.views} ${toSmallCaps('views')} | 💾 ${formatFileSize(file.fileSize)}\n`;
-                    fileList += `   🔗 ${toSmallCaps('ID')}: <code>${id}</code>\n\n`;
-                    
-                    buttons.push([{ text: toSmallCaps(`🔗 ${file.fileName.substring(0, 20)}...`), url: `${WEBAPP_URL}/stream/${id}` }]);
-                }
+
+        if (userFiles.length > 0) {
+            for (let i = 0; i < userFiles.length; i++) {
+                const file = userFiles[i];
+                const link = `${WEBAPP_URL}/file/${file.uniqueId}`;
+                fileList += `${i + 1}. **${toSmallCaps(file.fileName.substring(0, 40))}**\n`;
+                fileList += `   💾 ${formatFileSize(file.fileSize)} | 👁️ ${file.views} ${toSmallCaps('views')}\n`;
+                fileList += `   🔗 ${toSmallCaps('ID')}: <code>${file.uniqueId}</code>\n\n`;
+
+                buttons.push([{ text: toSmallCaps(`🔗 ${file.fileName.substring(0, 25)}...`), url: link }]);
             }
         }
-        
+
+        let fileHeader = `📁 <b>${toSmallCaps('Your 10 Latest Files')}</b>\n\n`;
+
         if (count === 0) {
-            fileList = toSmallCaps('📭 You haven\'t uploaded any files yet. Send me a video to get started!');
+            fileList = toSmallCaps('📭 You haven\'t uploaded any files yet. Send me a file to get started!');
         } else if (count > 10) {
-            fileList += `\n<i>${toSmallCaps('Showing 10 of')} ${count} ${toSmallCaps('files')}</i>`;
+            fileHeader += `\n<i>${toSmallCaps('Showing 10 of')} ${count} ${toSmallCaps('files')}</i>\n\n`;
         }
-        
+
+        await editMessage(fileHeader + fileList, { inline_keyboard: [...buttons, [{ text: toSmallCaps('🔙 Back'), callback_data: 'start' }]] });
+    }
+
+    else if (data === 'my_batches') {
+        const userBatches = Array.from(BATCH_DATABASE.values())
+            .filter(b => b.createdBy === userId)
+            .sort((a, b) => b.createdAt - a.createdAt) // Sort newest first
+            .slice(0, 10); // Show only the latest 10
+
+        let batchList = `📦 <b>${toSmallCaps('Your 10 Latest Batches')}</b>\n\n`;
+        let count = Array.from(BATCH_DATABASE.values()).filter(b => b.createdBy === userId).length;
+        const buttons = [];
+
+        if (userBatches.length > 0) {
+            let listCount = 0;
+            for (const batch of userBatches) {
+                listCount++;
+                const id = batch.uniqueId;
+                const typeLabel = batch.type === 'single_forward' ? 'Forward' : 'Sequential'; // Simplified label
+                batchList += `${listCount}. ${typeLabel} ${toSmallCaps('Batch')}\n`;
+                batchList += `   📋 ${batch.messageIds.length} ${toSmallCaps('files')} | 👁️ ${batch.views} ${toSmallCaps('views')}\n`;
+                batchList += `   🔗 ${toSmallCaps('ID')}: <code>${id}</code>\n\n`;
+
+                buttons.push([{ text: toSmallCaps(`📦 ${typeLabel} (${batch.messageIds.length} files)`), url: `${WEBAPP_URL}/batch/${id}` }]);
+            }
+        }
+
+        if (count === 0) {
+            batchList = toSmallCaps('📭 You haven\'t created any batches yet. Use "Create Batch" to get started!');
+        } else if (count > 10) {
+            batchList += `\n<i>${toSmallCaps('Showing 10 of')} ${count} ${toSmallCaps('batches')}</i>`;
+        }
+
         buttons.push([{ text: toSmallCaps('🔙 Back'), callback_data: 'start' }]);
-        
-        await editMessage(fileList, { inline_keyboard: buttons }, true); 
+
+        await editMessage(batchList, { inline_keyboard: buttons }, true);
+    }
+
+    else if (data === 'create_batch') {
+        const helpText = `
+📦 <b>${toSmallCaps('Create Batch Link')}</b>
+
+${toSmallCaps('Forward messages from any channel to me, then I\'ll create a batch link.')}
+
+<b>${toSmallCaps('How it works')}:</b>
+1️⃣ ${toSmallCaps('Forward messages from a channel')}
+2️⃣ ${toSmallCaps('I\'ll detect and group them')}
+3️⃣ ${toSmallCaps('Get a permanent batch link')}
+
+<b>${toSmallCaps('Types')}:</b>
+• <b>${toSmallCaps('Single Forward')}:</b> ${toSmallCaps('One message')}
+• <b>${toSmallCaps('Sequential Batch')}:</b> ${toSmallCaps('Multiple messages in order')}
+• <b>${toSmallCaps('Custom Batch')}:</b> ${toSmallCaps('Selected messages')}
+
+${toSmallCaps('Start by forwarding messages now!')}
+        `;
+
+        await editMessage(helpText, { inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'start' }]] });
     }
 
     else if (data === 'help') {
         const helpText = `
 📖 <b>${toSmallCaps('How to Use')}</b>
 
-<b>${toSmallCaps('Step 1: Send File')}</b>
-${toSmallCaps('Send me any video, document, or photo file from your device or forward from a channel.')}
+<b>${toSmallCaps('Single File Links')}:</b>
+${toSmallCaps('Send me any video, document, or photo file and I\'ll generate a permanent streaming/download link.')}
 
-<b>${toSmallCaps('Step 2: Get Link')}</b>
-${toSmallCaps('I\'ll instantly generate a permanent streaming/download link for you.')}
+<b>${toSmallCaps('Batch Links')}:</b>
+${toSmallCaps('Forward messages from channels to create batch links that send multiple files at once.')}
 
-<b>${toSmallCaps('Step 3: Use Anywhere')}</b>
-${toSmallCaps('Copy the link and use it on your website, app, or share it! Links support video seeking.')}
+<b>${toSmallCaps('Features')}:</b>
+✅ ${toSmallCaps('Permanent links that never expire')}
+✅ ${toSmallCaps('Direct streaming with seeking support')}
+✅ ${toSmallCaps('Batch/Sequential forwarding')}
+✅ ${toSmallCaps('Analytics and tracking')}
 
-<b>💡 ${toSmallCaps('Pro Tip')}s:</b>
-• ${toSmallCaps('Links never expire.')}
-• ${toSmallCaps('Use')} /files ${toSmallCaps('to see all your uploads.')}
-• ${toSmallCaps('Use')} /stats ${toSmallCaps('for personal analytics.')}
+<b>💡 ${toSmallCaps('Commands')}:</b>
+• /files - ${toSmallCaps('View your uploaded files')}
+• /batch - ${toSmallCaps('Create batch links')}
+• /stats - ${toSmallCaps('View your statistics')}
         `;
-        
+
         await editMessage(helpText, { inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'start' }]] });
     }
-    
-    // --- Admin Handlers (fully implemented) ---
+
+    // Admin handlers
     else if (data === 'admin_panel' && isAdmin(userId)) {
         await editMessage(`👑 <b>${toSmallCaps('Admin Panel')}</b>\n\n${toSmallCaps('Welcome Admin! Choose an option below')}:`, getAdminKeyboard());
     }
-    
-    // Admin: Bot Statistics
+
     else if (data === 'admin_stats' && isAdmin(userId)) {
         const uptime = formatDuration(Date.now() - ANALYTICS.startTime);
         const cacheSize = URL_CACHE.size;
-        
+
         const statsText = `
 📊 <b>${toSmallCaps('Bot Global Statistics')}</b>
 
 ⚙️ <b>${toSmallCaps('Uptime')}:</b> ${uptime}
 👥 <b>${toSmallCaps('Total Users')}:</b> ${USER_DATABASE.size}
 📁 <b>${toSmallCaps('Total Files')}:</b> ${FILE_DATABASE.size}
+📦 <b>${toSmallCaps('Total Batches')}:</b> ${BATCH_DATABASE.size}
 👁️ <b>${toSmallCaps('Total Views')}:</b> ${ANALYTICS.totalViews}
 ⬇️ <b>${toSmallCaps('Total Downloads')}:</b> ${ANALYTICS.totalDownloads}
-🧹 <b>${toSmallCaps('Active URL Cache Entries')}:</b> ${cacheSize}
+🧹 <b>${toSmallCaps('Active URL Cache')}:</b> ${cacheSize}
 
-${toSmallCaps('Channel IDs configured')}: ${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.length}
+${toSmallCaps('Channels configured')}: ${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.length}
         `;
-        
+
         await editMessage(statsText, { inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'admin_panel' }]] });
     }
-    
-    // Admin: Manage Channels
+
     else if (data === 'admin_list_channels' && isAdmin(userId)) {
         const channelDetails = await Promise.all(CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.map(id => getChannelDetails(id)));
-        
-        const listText = `🔗 **${toSmallCaps('Mandatory Channels')}**\n\n` + (channelDetails.length > 0 ? channelDetails.map((d, i) => 
+
+        const listText = `🔗 **${toSmallCaps('Mandatory Channels')}**\n\n` + (channelDetails.length > 0 ? channelDetails.map((d, i) =>
             `${i + 1}. **${toSmallCaps(d.title)}**\n   ${toSmallCaps('ID')}: <code>${d.id}</code>\n   ${toSmallCaps('Username')}: ${d.username || toSmallCaps('N/A (Private)')}${d.error ? `\n   ⚠️ ${toSmallCaps('Bot is not admin/member.')}` : ''}`
         ).join('\n\n') : toSmallCaps('No channels are currently configured.'));
-        
+
         const keyboard = {
             inline_keyboard: [
                 ...channelDetails.map(d => ([{ text: toSmallCaps(`❌ Remove ${d.title.substring(0, 15)}...`), callback_data: `admin_remove_channel_${d.id}` }])),
@@ -614,7 +735,7 @@ ${toSmallCaps('Channel IDs configured')}: ${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.l
 
         await editMessage(listText, keyboard);
     }
-    
+
     else if (data === 'admin_add_channel_prompt' && isAdmin(userId)) {
         await editMessage(`🔗 **${toSmallCaps('Add Mandatory Join Channel')}**\n\n${toSmallCaps('Select a method to add the channel.')}`, {
             inline_keyboard: [
@@ -624,14 +745,14 @@ ${toSmallCaps('Channel IDs configured')}: ${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.l
             ]
         });
     }
-    
+
     else if (data === 'admin_add_channel_forward' && isAdmin(userId)) {
         USER_STATE.set(userId, { state: 'ADDING_JOIN_CHANNEL_FORWARD' });
         await editMessage(`➡️ **${toSmallCaps('Forward a Message')}**\n\n${toSmallCaps('Please forward ANY message from the channel you want to add to this chat now.')}`, {
             inline_keyboard: [[{ text: toSmallCaps('❌ Cancel'), callback_data: 'admin_panel' }]]
         });
     }
-    
+
     else if (data === 'admin_add_channel_id' && isAdmin(userId)) {
         USER_STATE.set(userId, { state: 'ADDING_JOIN_CHANNEL_ID' });
         await editMessage(`🆔 **${toSmallCaps('Send ID/Username')}**\n\n${toSmallCaps('Send the Channel ID (e.g.,')} \`-100XXXXXXXXXX\` ${toSmallCaps(') or Channel Username (e.g.,')} \`@mychannel\`).`, {
@@ -643,14 +764,13 @@ ${toSmallCaps('Channel IDs configured')}: ${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.l
         const channelIdToRemove = parseInt(data.substring(21));
         CONFIG_STATE.FORCE_SUB_CHANNEL_IDS = CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.filter(id => id !== channelIdToRemove);
         CHANNEL_DETAILS_CACHE.delete(channelIdToRemove);
-        
+
         await bot.answerCallbackQuery(query.id, { text: toSmallCaps('✅ Channel removed successfully!'), show_alert: true });
         await editMessage(`🔗 **${toSmallCaps('Channel Removed')}**\n\n${toSmallCaps('Channel ID')} <code>${channelIdToRemove}</code> ${toSmallCaps('is no longer mandatory.')}`, {
             inline_keyboard: [[{ text: toSmallCaps('🔙 Back to Channel List'), callback_data: 'admin_list_channels' }]]
         });
     }
-    
-    // Admin: Broadcast Start
+
     else if (data === 'admin_broadcast_start' && isAdmin(userId)) {
         USER_STATE.set(userId, { state: 'AWAITING_BROADCAST_MESSAGE' });
         await editMessage(`📢 <b>${toSmallCaps('Universal Broadcast')}</b>\n\n${toSmallCaps('Please send the message (text, photo, video, etc.) you want to broadcast to all')} ${USER_DATABASE.size} ${toSmallCaps('users.')}`, {
@@ -658,80 +778,75 @@ ${toSmallCaps('Channel IDs configured')}: ${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.l
         });
     }
 
-    // Admin: Cache Cleanup
     else if (data === 'admin_clean' && isAdmin(userId)) {
         const cleanedCount = URL_CACHE.size;
         URL_CACHE.clear();
-        
-        await bot.answerCallbackQuery(query.id, { text: toSmallCaps(`✅ Cleaned ${cleanedCount} cached file URLs.`), show_alert: true });
-        await editMessage(`🗑️ <b>${toSmallCaps('Cache Cleanup Complete')}</b>\n\n${toSmallCaps('Successfully cleared all')} ${cleanedCount} ${toSmallCaps('temporary Telegram file URLs from the cache.')}`, {
+
+        await bot.answerCallbackQuery(query.id, { text: toSmallCaps(`✅ Cleaned ${cleanedCount} cached URLs.`), show_alert: true });
+        await editMessage(`🗑️ <b>${toSmallCaps('Cache Cleanup Complete')}</b>\n\n${toSmallCaps('Successfully cleared all')} ${cleanedCount} ${toSmallCaps('temporary file URLs.')}`, {
             inline_keyboard: [[{ text: toSmallCaps('🔙 Back'), callback_data: 'admin_panel' }]]
         });
     }
 
-    // Handle broadcast confirmation
     else if (data.startsWith('admin_broadcast_confirm_') && isAdmin(userId)) {
         const broadcastType = data.substring(24);
         const state = USER_STATE.get(userId);
         if (!state || !state.broadcastMsg) {
-            return bot.answerCallbackQuery(query.id, { text: toSmallCaps('❌ Broadcast data expired or missing.'), show_alert: true });
+            return bot.answerCallbackQuery(query.id, { text: toSmallCaps('❌ Broadcast data expired.'), show_alert: true });
         }
 
-        await editMessage(`🚀 <b>${toSmallCaps('Starting Broadcast...')}</b>\n\n${toSmallCaps('This may take some time. I will notify you when it is complete.')}`, null);
+        await editMessage(`🚀 <b>${toSmallCaps('Starting Broadcast...')}</b>\n\n${toSmallCaps('This may take some time.')}`, null);
 
         const broadcastMsg = state.broadcastMsg;
         let successCount = 0;
         let blockCount = 0;
-        const targetUsers = Array.from(USER_DATABASE.keys());
-        
+        // Filter out users marked as blocked before broadcasting
+        const targetUsers = Array.from(USER_DATABASE.keys()).filter(id => !USER_DATABASE.get(id).isBlocked);
+
         for (const targetId of targetUsers) {
-            if (isAdmin(targetId) && targetId === userId) continue; 
-            
+            if (isAdmin(targetId) && targetId === userId) continue;
+
             try {
                 if (broadcastType === 'text') {
-                    await bot.sendMessage(targetId, broadcastMsg.text, { parse_mode: 'HTML', disable_web_page_preview: true });
+                    await bot.sendMessage(targetId, broadcastMsg.text, { parse_mode: 'HTML' });
                 } else if (broadcastType === 'photo') {
                     await bot.sendPhoto(targetId, broadcastMsg.fileId, { caption: broadcastMsg.caption, parse_mode: 'HTML' });
                 } else if (broadcastType === 'video') {
-                     await bot.sendVideo(targetId, broadcastMsg.fileId, { caption: broadcastMsg.caption, parse_mode: 'HTML' });
+                    await bot.sendVideo(targetId, broadcastMsg.fileId, { caption: broadcastMsg.caption, parse_mode: 'HTML' });
                 }
-                
+
                 successCount++;
             } catch (error) {
-                if (error.response && (error.response.statusCode === 403 || error.response.body.description.includes('bot was blocked by the user'))) {
+                // Check for 403 Forbidden (bot blocked by user)
+                if (error.response && error.response.statusCode === 403) {
                     USER_DATABASE.get(targetId).isBlocked = true;
                     blockCount++;
                 } else {
-                    console.error(`Error sending broadcast to ${targetId}:`, error.message);
+                    console.error(`Broadcast failed for user ${targetId}: ${error.message}`);
                 }
             }
-            await sleep(50); // Throttle for safety (20 messages per second limit)
+            await sleep(50); // Rate limit to 20 messages per second (20*50ms = 1 second)
         }
-        
-        USER_STATE.delete(userId); // Clear state after job done
 
-        const resultText = `
+        USER_STATE.delete(userId);
+
+        // Send results back to admin
+        await bot.sendMessage(chatId, `
 ✅ <b>${toSmallCaps('Broadcast Complete!')}</b>
 
-👥 <b>${toSmallCaps('Total Users Attempted')}:</b> ${targetUsers.length}
-🟢 <b>${toSmallCaps('Successful Sends')}:</b> ${successCount}
-🔴 <b>${toSmallCaps('Bot Blocked')}:</b> ${blockCount}
-        `;
-        
-        await bot.sendMessage(chatId, resultText, {
+🟢 ${toSmallCaps('Successful')}: ${successCount}
+🔴 ${toSmallCaps('Blocked')}: ${blockCount}
+        `, {
             parse_mode: 'HTML',
-            reply_markup: { inline_keyboard: [[{ text: toSmallCaps('🔙 Back to Admin'), callback_data: 'admin_panel' }]] }
+            reply_markup: { inline_keyboard: [[{ text: toSmallCaps('🔙 Admin'), callback_data: 'admin_panel' }]] }
         });
     }
 
-
-    // Always answer the query to dismiss loading state
     await bot.answerCallbackQuery(query.id);
 });
 
-
 // ============================================
-// MESSAGE HANDLER (File Upload & Multi-step State)
+// MESSAGE HANDLER
 // ============================================
 
 bot.on('message', async (msg) => {
@@ -739,84 +854,98 @@ bot.on('message', async (msg) => {
     const userId = msg.from.id;
     const username = msg.from.username;
     const firstName = msg.from.first_name;
-    
-    registerUser(userId, username, firstName); 
 
-    // Ignore commands (they are handled by bot.onText)
+    registerUser(userId, username, firstName);
+
+    // If the message is a command, skip the rest of the message handlers
     if (msg.text && msg.text.startsWith('/')) return;
-    
-    // 1. Admin State Check (Adding Join Channel - Forwarded Message)
+
+
+    // Helper for admins: Displays forwarded message details
+    if (isAdmin(userId) && msg.forward_from_chat) {
+        const messageId = msg.forward_from_message_id; // Using `forward_from_message_id` which is reliable
+        const channelId = msg.forward_from_chat.id;
+        const channelUsername = msg.forward_from_chat.username ? `@${msg.forward_from_chat.username}` : null;
+
+        await bot.sendMessage(chatId, `📨 <b>${toSmallCaps('Forwarded Message Details')}:</b>\n\n` +
+            `<b>${toSmallCaps('Message ID')}:</b> <code>${messageId}</code>\n` +
+            `<b>${toSmallCaps('Channel ID')}:</b> <code>${channelId}</code>\n` +
+            `<b>${toSmallCaps('Channel Username')}:</b> ${channelUsername || toSmallCaps('N/A')}\n\n` +
+            `${toSmallCaps('For .env')}:\n` +
+            `WELCOME_SOURCE_MESSAGE_ID=${messageId}\n` +
+            `WELCOME_SOURCE_CHANNEL=${channelId}`, {
+            parse_mode: 'HTML'
+        });
+    }
+
+    // Admin: Adding channel (forward)
     if (isAdmin(userId) && USER_STATE.has(userId) && USER_STATE.get(userId).state === 'ADDING_JOIN_CHANNEL_FORWARD') {
-        USER_STATE.delete(userId); // Consume state
+        USER_STATE.delete(userId);
 
         if (msg.forward_from_chat && (msg.forward_from_chat.type === 'channel' || msg.forward_from_chat.type === 'supergroup')) {
             const newId = msg.forward_from_chat.id;
-            
+
             if (CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.includes(newId)) {
-                return bot.sendMessage(chatId, `❌ **${toSmallCaps('Failed!')}** ${toSmallCaps('Channel is already in the mandatory list.')}`, { parse_mode: 'Markdown' });
+                return bot.sendMessage(chatId, `❌ ${toSmallCaps('Channel already added.')}`, { parse_mode: 'HTML' });
             }
 
             try {
                 const chatInfo = await bot.getChat(newId);
-                const botMember = await bot.getChatMember(newId, bot.options.id);
+                const botMember = await bot.getChatMember(newId, BOT_INFO.id);
 
                 if (botMember.status === 'left' || botMember.status === 'kicked') {
-                     return bot.sendMessage(chatId, `❌ **${toSmallCaps('Failed!')}** ${toSmallCaps('The bot must be an administrator or a member in this channel to verify subscriptions.')}`, { parse_mode: 'Markdown' });
+                    return bot.sendMessage(chatId, `❌ ${toSmallCaps('Bot must be admin/member in the channel.')}`, { parse_mode: 'HTML' });
                 }
 
                 CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.push(newId);
                 CHANNEL_DETAILS_CACHE.set(newId, { title: chatInfo.title, username: chatInfo.username ? `@${chatInfo.username}` : null, id: newId });
-                
-                return bot.sendMessage(chatId, `✅ **${toSmallCaps('Mandatory Join Channel Added!')}**\n\n${toSmallCaps('Channel')}: **${chatInfo.title}**\n${toSmallCaps('ID')}: <code>${newId}</code>`, { parse_mode: 'HTML' });
+
+                return bot.sendMessage(chatId, `✅ <b>${toSmallCaps('Channel Added!')}</b>\n\n${toSmallCaps('Channel')}: **${chatInfo.title}**\n${toSmallCaps('ID')}: <code>${newId}</code>`, { parse_mode: 'HTML' });
             } catch (e) {
-                // FIX: This now handles the specific error you were seeing when adding a channel
-                console.error('Error adding forwarded channel:', e.message);
-                return bot.sendMessage(chatId, `❌ **${toSmallCaps('Error adding channel.')}**\n\n${toSmallCaps('Please ensure the bot is an admin/member of the channel.')}\n${toSmallCaps('Reason')}: ${e.message}`, { parse_mode: 'Markdown' });
+                return bot.sendMessage(chatId, `❌ <b>${toSmallCaps('Error:')}</b> ${toSmallCaps(e.message)}`, { parse_mode: 'HTML' });
             }
 
         } else {
-            return bot.sendMessage(chatId, `❌ **${toSmallCaps('Invalid Forward.')}** ${toSmallCaps('Please forward a message directly from the CHANNEL you wish to add.')}`, { parse_mode: 'Markdown' });
+            return bot.sendMessage(chatId, `❌ ${toSmallCaps('Please forward a message from a channel/supergroup.')}`, { parse_mode: 'HTML' });
         }
     }
 
-
-    // 2. Admin State Check (Adding Join Channel - ID/Username input)
+    // Admin: Adding channel (ID)
     if (isAdmin(userId) && USER_STATE.has(userId) && USER_STATE.get(userId).state === 'ADDING_JOIN_CHANNEL_ID' && msg.text) {
-        USER_STATE.delete(userId); // Consume state
-        let newIdText = msg.text.trim();
-        let targetIdentifier = newIdText.startsWith('-100') ? parseInt(newIdText) : newIdText;
+        USER_STATE.delete(userId);
+        let targetIdentifier = msg.text.trim();
+        // Telegram channel IDs are usually negative and start with -100
+        let isId = targetIdentifier.startsWith('-100') && !isNaN(parseInt(targetIdentifier));
+        let targetId = isId ? parseInt(targetIdentifier) : targetIdentifier;
 
         try {
-            const chatInfo = await bot.getChat(targetIdentifier);
+            const chatInfo = await bot.getChat(targetId);
             const actualId = chatInfo.id;
-            
+
             if (CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.includes(actualId)) {
-                return bot.sendMessage(chatId, `❌ **${toSmallCaps('Failed!')}** ${toSmallCaps('This channel is already in the mandatory list.')}`, { parse_mode: 'Markdown' });
+                return bot.sendMessage(chatId, `❌ ${toSmallCaps('Channel already added.')}`, { parse_mode: 'HTML' });
             }
 
-            const isChannel = chatInfo.type === 'channel' || chatInfo.type === 'supergroup';
-            
-            if (isChannel) {
-                const botMember = await bot.getChatMember(actualId, bot.options.id);
+            if (chatInfo.type === 'channel' || chatInfo.type === 'supergroup') {
+                const botMember = await bot.getChatMember(actualId, BOT_INFO.id);
                 if (botMember.status === 'left' || botMember.status === 'kicked') {
-                    return bot.sendMessage(chatId, `❌ **${toSmallCaps('Failed!')}** ${toSmallCaps('The bot must be an administrator or a member in this channel to verify subscriptions.')}`, { parse_mode: 'Markdown' });
+                    return bot.sendMessage(chatId, `❌ ${toSmallCaps('Bot must be admin/member in the channel.')}`, { parse_mode: 'HTML' });
                 }
 
                 CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.push(actualId);
                 CHANNEL_DETAILS_CACHE.set(actualId, { title: chatInfo.title, username: chatInfo.username ? `@${chatInfo.username}` : null, id: actualId });
-                
-                await bot.sendMessage(chatId, `✅ **${toSmallCaps('Mandatory Join Channel Added!')}**\n\n${toSmallCaps('Channel')}: **${chatInfo.title}**\n${toSmallCaps('ID')}: <code>${actualId}</code>`, { parse_mode: 'HTML' });
+
+                await bot.sendMessage(chatId, `✅ <b>${toSmallCaps('Channel Added!')}</b>\n\n${toSmallCaps('Channel')}: **${chatInfo.title}**\n${toSmallCaps('ID')}: <code>${actualId}</code>`, { parse_mode: 'HTML' });
             } else {
-                return bot.sendMessage(chatId, `❌ **${toSmallCaps('Invalid Chat Type!')}** ${toSmallCaps('Please send the ID or Username of a Channel or Supergroup.')}`, { parse_mode: 'Markdown' });
+                return bot.sendMessage(chatId, `❌ ${toSmallCaps('The provided ID/Username must belong to a channel or supergroup.')}`, { parse_mode: 'HTML' });
             }
         } catch (e) {
-            console.error('Error adding channel by ID/username:', e.message);
-            return bot.sendMessage(chatId, `❌ **${toSmallCaps('Channel Not Found!')}** ${toSmallCaps('Please ensure the ID/Username is correct and the bot is an admin/member of the channel.')}\n${toSmallCaps('Reason')}: ${e.message}`, { parse_mode: 'Markdown' });
+            return bot.sendMessage(chatId, `❌ <b>${toSmallCaps('Not found/Error:')}</b> ${toSmallCaps(e.message)}`, { parse_mode: 'HTML' });
         }
         return;
     }
-    
-    // 3. Admin State Check (Awaiting Broadcast Message) - Fully implemented
+
+    // Admin: Broadcast
     if (isAdmin(userId) && USER_STATE.has(userId) && USER_STATE.get(userId).state === 'AWAITING_BROADCAST_MESSAGE') {
         let broadcastMsg = {};
         let type;
@@ -825,299 +954,322 @@ bot.on('message', async (msg) => {
             broadcastMsg = { text: msg.text };
             type = 'text';
         } else if (msg.photo) {
-            const photo = msg.photo[msg.photo.length - 1];
-            broadcastMsg = { fileId: photo.file_id, caption: msg.caption || '' };
+            broadcastMsg = { fileId: msg.photo[msg.photo.length - 1].file_id, caption: msg.caption || '' };
             type = 'photo';
         } else if (msg.video) {
             broadcastMsg = { fileId: msg.video.file_id, caption: msg.caption || '' };
             type = 'video';
         } else {
-            return bot.sendMessage(chatId, toSmallCaps('⚠️ Unsupported message type for broadcast. Please send text, photo, or video.'), {
-                reply_markup: { inline_keyboard: [[{ text: toSmallCaps('❌ Cancel Broadcast'), callback_data: 'admin_panel' }]] }
-            });
+            return bot.sendMessage(chatId, toSmallCaps('⚠️ Text, photo, or video only.'));
         }
-        
-        // Store message data in state
-        USER_STATE.set(userId, { state: 'CONFIRMING_BROADCAST', broadcastMsg: broadcastMsg });
 
-        await bot.sendMessage(chatId, `⚠️ **${toSmallCaps('Confirm Broadcast')}**\n\n${toSmallCaps('You are about to send this message (shown above) to all')} ${USER_DATABASE.size} ${toSmallCaps('users.')}\n\n${toSmallCaps('Type')}: ${type.toUpperCase()}`, {
+        USER_STATE.set(userId, { state: 'CONFIRMING_BROADCAST', broadcastMsg });
+
+        await bot.sendMessage(chatId, `⚠️ ${toSmallCaps('Confirm broadcast to')} ${USER_DATABASE.size} ${toSmallCaps('users?')}`, {
             parse_mode: 'HTML',
             reply_markup: {
                 inline_keyboard: [
-                    [
-                        { text: toSmallCaps('✅ CONFIRM AND SEND'), callback_data: `admin_broadcast_confirm_${type}` }
-                    ],
-                    [
-                        { text: toSmallCaps('❌ Cancel Broadcast'), callback_data: 'admin_panel' }
-                    ]
+                    [{ text: toSmallCaps('✅ CONFIRM'), callback_data: `admin_broadcast_confirm_${type}` }],
+                    [{ text: toSmallCaps('❌ Cancel'), callback_data: 'admin_panel' }]
                 ]
             }
         });
         return;
     }
-    
-    // 4. File Upload Logic - WRAPPED IN PROTECTED ACTION
+
+    // Handle forwarded messages (batch creation)
+    if (msg.forward_from_chat) {
+        const fromChatId = msg.forward_from_chat.id;
+        // Use forward_from_message_id as it's the specific message ID in the source chat
+        const forwardedMessageId = msg.forward_from_message_id;
+
+        const action = async () => {
+            const uniqueId = generateUniqueId();
+
+            // For now, create a single forward batch
+            BATCH_DATABASE.set(uniqueId, {
+                uniqueId,
+                type: 'single_forward',
+                fromChatId,
+                messageIds: [forwardedMessageId],
+                createdBy: userId,
+                createdAt: Date.now(),
+                views: 0,
+                lastAccessed: Date.now()
+            });
+
+            ANALYTICS.totalBatches++;
+
+            const batchLink = `${WEBAPP_URL}/batch/${uniqueId}`;
+
+            await bot.sendMessage(chatId, `
+✅ <b>${toSmallCaps('Batch Link Created!')}</b>
+
+📦 <b>${toSmallCaps('Type')}:</b> ${toSmallCaps('Single Forward')}
+📋 <b>${toSmallCaps('Files')}:</b> 1
+
+🔗 <b>${toSmallCaps('Link')}:</b>
+<code>${batchLink}</code>
+
+${toSmallCaps('Share this link to forward the message automatically!')}
+            `, {
+                parse_mode: 'HTML',
+                reply_markup: {
+                    inline_keyboard: [[{ text: toSmallCaps('🔗 Open Link'), url: batchLink }]]
+                }
+            });
+        };
+
+        await forceSubRequired(msg, action);
+        return;
+    }
+
+    // File upload
     const file = msg.video || msg.document || msg.photo;
-    
+
     if (!file) return;
 
     const action = async () => {
         const fileData = Array.isArray(file) ? file[file.length - 1] : file;
-        
+
         try {
             const fileId = fileData.file_id;
             const fileUniqueId = fileData.file_unique_id;
-            const fileMimeType = fileData.mime_type || (fileData.mime_type || (fileData.width && fileData.height ? 'image/jpeg' : 'application/octet-stream'));
-            // FIX: Robust file name handling
-            const fileName = fileData.file_name || (msg.caption || `${toSmallCaps('file')}_${fileUniqueId}.${fileMimeType.split('/')[1] || 'dat'}`);
+            // Use file attributes for mime/name if available, fallback for photos
+            const fileMimeType = fileData.mime_type || (fileData.width ? 'image/jpeg' : 'application/octet-stream');
+            const fileName = fileData.file_name || (msg.caption || `file_${fileUniqueId}.${fileMimeType.split('/')[1] || 'dat'}`);
             const fileSize = fileData.file_size || 0;
-            
-            // Processing animation
-            const processingMsg = await bot.sendMessage(chatId, `⏳ <b>${toSmallCaps('Processing your file...')}</b>`, {
-                parse_mode: 'HTML'
-            });
-            
-            await sleep(1000);
-            
+
+            const processingMsg = await bot.sendMessage(chatId, `⏳ <b>${toSmallCaps('Processing...')}</b>`, { parse_mode: 'HTML' });
+
+            await sleep(1000); // Simulate processing time
+
             const uniqueId = generateUniqueId();
-            
+
             FILE_DATABASE.set(uniqueId, {
-                uniqueId: uniqueId,
-                fileId: fileId,
-                fileUniqueId: fileUniqueId,
-                fileName: fileName,
-                fileSize: fileSize,
-                fileMimeType: fileMimeType, 
+                uniqueId,
+                fileId,
+                fileUniqueId,
+                fileName,
+                fileSize,
+                fileMimeType,
                 uploadedBy: userId,
                 uploaderName: firstName,
-                chatId: chatId,
+                chatId,
                 createdAt: Date.now(),
                 views: 0,
                 downloads: 0,
                 lastAccessed: Date.now()
             });
-            
-            const user = USER_DATABASE.get(userId);
-            user.totalUploads++;
+
+            USER_DATABASE.get(userId).totalUploads++;
             ANALYTICS.totalFiles++;
-            
+
             const streamLink = `${WEBAPP_URL}/stream/${uniqueId}`;
             const downloadLink = `${WEBAPP_URL}/download/${uniqueId}`;
-            
+            const fileLink = `${WEBAPP_URL}/file/${uniqueId}`;
+
             await bot.deleteMessage(chatId, processingMsg.message_id);
-            
-            const successText = `
-✅ <b>${toSmallCaps('Permanent Link Generated Successfully!')}</b>
 
-📁 <b>${toSmallCaps('File Name')}:</b> ${fileName}
-💾 <b>${toSmallCaps('File Size')}:</b> ${formatFileSize(fileSize)}
+            await bot.sendMessage(chatId, `
+✅ <b>${toSmallCaps('Link Generated!')}</b>
 
-🔗 <b>${toSmallCaps('Streaming Link')}:</b>
-<code>${streamLink}</code>
+📁 <b>${toSmallCaps('Name')}:</b> ${fileName}
+💾 <b>${toSmallCaps('Size')}:</b> ${formatFileSize(fileSize)}
 
-⬇️ <b>${toSmallCaps('Download Link')}:</b>
-<code>${downloadLink}</code>
+🔗 <b>${toSmallCaps('Shareable Link')}:</b>
+<code>${fileLink}</code>
 
-<b>✨ ${toSmallCaps('Link Status')}:</b> ${toSmallCaps('PERMANENT')}
-            `;
-            
-            await bot.sendMessage(chatId, successText, {
+<b>${toSmallCaps('Direct Links')}:</b>
+🔗 ${toSmallCaps('Stream')}: <code>${streamLink}</code>
+⬇️ ${toSmallCaps('Download')}: <code>${downloadLink}</code>
+            `, {
                 parse_mode: 'HTML',
-                disable_web_page_preview: true,
                 reply_markup: {
                     inline_keyboard: [
                         [
-                            { text: toSmallCaps('🔗 Open Stream'), url: streamLink },
+                            { text: toSmallCaps('🔗 Share'), url: fileLink },
+                            { text: toSmallCaps('📺 Stream'), url: streamLink }
+                        ],
+                        [
                             { text: toSmallCaps('⬇️ Download'), url: downloadLink }
                         ]
                     ]
                 }
             });
-            
+
         } catch (error) {
             console.error('❌ Upload error:', error);
-            await bot.sendMessage(chatId, `❌ <b>${toSmallCaps('Error generating link.')}</b>\n\n${toSmallCaps('Please try again or contact admin.')}`, {
-                parse_mode: 'HTML'
-            });
+            await bot.sendMessage(chatId, `❌ <b>${toSmallCaps('Error generating link. Please try again or contact Admin.')}</b>`, { parse_mode: 'HTML' });
         }
     };
-    
-    // Intercept file upload
-    await forceSubCheckAndIntercept(msg, action);
+
+    await forceSubRequired(msg, action);
 });
 
-
 // ============================================
-// EXPRESS SERVER (HTTP/Streaming Handlers)
+// EXPRESS SERVER
 // ============================================
 const app = express();
 app.use(express.json());
-// Ensure you have a 'public' folder if you plan to use express.static
 app.use(express.static('public'));
 
+// Headers for CORS and Streaming
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Range, Content-Type');
+    res.header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Range, Content-Type, Accept');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
 });
 
-// Home page (Fully styled)
+// Homepage
 app.get('/', (req, res) => {
     res.send(`
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${toSmallCaps('BeatAnimes Link Generator')}</title>
+    <title>BeatAnimes Link Generator</title>
     <style>
         body { font-family: sans-serif; background: #2c3e50; color: white; text-align: center; padding: 50px; }
         .container { max-width: 600px; margin: 0 auto; background: #34495e; padding: 30px; border-radius: 10px; }
-        h1 { font-size: 2.5em; margin-bottom: 20px; }
-        p { font-size: 1.1em; margin-bottom: 10px; opacity: 0.8; }
-        .btn { display: inline-block; padding: 10px 20px; margin-top: 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px; }
+        h1 { font-size: 2.5em; }
+        .btn { display: inline-block; padding: 10px 20px; margin: 20px 5px; background: #3498db; color: white; text-decoration: none; border-radius: 5px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🎬 ${toSmallCaps('BeatAnimes Link Generator')}</h1>
-        <p>${toSmallCaps('Generate Permanent Streaming Links for Your Videos.')}</p>
-        <p>${toSmallCaps('Total Users')}: ${USER_DATABASE.size} | ${toSmallCaps('Total Files')}: ${FILE_DATABASE.size} | ${toSmallCaps('Total Views')}: ${ANALYTICS.totalViews}</p>
-        <a href="https://t.me/${bot.options.username || 'YourBotUsername'}" class="btn">${toSmallCaps('Start Using Bot 🚀')}</a>
+        <h1>🎬 BeatAnimes Link Generator</h1>
+        <p>Permanent Streaming & Batch Links</p>
+        <p>Users: ${USER_DATABASE.size} | Files: ${FILE_DATABASE.size} | Batches: ${BATCH_DATABASE.size}</p>
+        <a href="https://t.me/${BOT_INFO ? BOT_INFO.username : 'bot'}" class="btn">Start Bot 🚀</a>
     </div>
 </body>
 </html>
     `);
 });
 
+// Batch link handler - redirects to bot with deep link
+app.get('/batch/:uniqueId', (req, res) => {
+    const uniqueId = req.params.uniqueId;
+    const batchData = BATCH_DATABASE.get(uniqueId);
 
-// Stream video with range support (CORE FEATURE)
-app.get('/stream/:id', async (req, res) => {
-    const id = req.params.id;
-    const fileData = FILE_DATABASE.get(id);
-
-    if (!fileData) {
-        return res.status(404).send(toSmallCaps('File not found or has expired.'));
+    if (!batchData) {
+        return res.status(404).send('<h1>❌ Batch link not found or expired</h1>');
     }
 
-    try {
-        const fileUrl = await getFreshFileUrl(fileData);
-        const range = req.headers.range;
-        
-        const fileMimeType = fileData.fileMimeType || 'video/mp4'; 
+    let linkType = 'batch';
+    if (batchData.type === 'single_forward') linkType = 'forward';
+    else if (batchData.type === 'sequential_batch') linkType = 'sequential';
+    else if (batchData.type === 'custom_file_batch') linkType = 'custom';
 
-        if (range) {
-            // Range request (for seeking/partial content)
-            const parts = range.replace(/bytes=/, '').split('-');
-            const start = parseInt(parts[0], 10);
-            const end = parts[1] ? parseInt(parts[1], 10) : fileData.fileSize - 1;
-            const contentLength = (end - start) + 1;
-            
-            const headers = {
-                'Content-Range': `bytes ${start}-${end}/${fileData.fileSize}`,
-                'Accept-Ranges': 'bytes',
-                'Content-Length': contentLength,
-                'Content-Type': fileMimeType
-            };
-            
-            const fetchOptions = { headers: { Range: `bytes=${start}-${end}` } };
-            const fileResponse = await fetch(fileUrl, fetchOptions);
-
-            res.writeHead(206, headers);
-            fileResponse.body.pipe(res);
-
-        } else {
-            // Full file request
-            const headers = {
-                'Content-Length': fileData.fileSize,
-                'Content-Type': fileMimeType,
-                'Accept-Ranges': 'bytes'
-            };
-            
-            const fileResponse = await fetch(fileUrl);
-            res.writeHead(200, headers);
-            fileResponse.body.pipe(res);
-        }
-
-        fileData.views++;
-        fileData.lastAccessed = Date.now();
-        ANALYTICS.totalViews++;
-
-    } catch (error) {
-        console.error('❌ Streaming Error:', error.message);
-        res.status(500).send(toSmallCaps('Streaming failed: Could not retrieve file from Telegram.'));
-    }
+    const deepLink = `https://t.me/${BOT_INFO ? BOT_INFO.username : 'bot'}?start=${linkType}_${uniqueId}`;
+    res.redirect(deepLink);
 });
 
+// File link handler - redirects to bot with deep link
+app.get('/file/:uniqueId', (req, res) => {
+    const uniqueId = req.params.uniqueId;
+    const fileData = FILE_DATABASE.get(uniqueId);
 
-// Download video
+    if (!fileData) {
+        return res.status(404).send('<h1>❌ File not found or expired</h1>');
+    }
+
+    const deepLink = `https://t.me/${BOT_INFO ? BOT_INFO.username : 'bot'}?start=file_${uniqueId}`;
+    res.redirect(deepLink);
+});
+
+// Download endpoint (Redirects to file URL, triggering a download)
 app.get('/download/:id', async (req, res) => {
     const id = req.params.id;
     const fileData = FILE_DATABASE.get(id);
 
     if (!fileData) {
-        return res.status(404).send(toSmallCaps('File not found or has expired.'));
+        return res.status(404).send('File not found');
     }
 
     try {
         const fileUrl = await getFreshFileUrl(fileData);
-        const fileResponse = await fetch(fileUrl);
-        
-        res.setHeader('Content-Disposition', `attachment; filename="${fileData.fileName}"`);
-        res.setHeader('Content-Type', fileResponse.headers.get('content-type') || 'application/octet-stream');
-        res.setHeader('Content-Length', fileData.fileSize);
-        
-        fileResponse.body.pipe(res);
-
+        // Track download
+        ANALYTICS.totalDownloads++;
         fileData.downloads++;
         fileData.lastAccessed = Date.now();
-        ANALYTICS.totalDownloads++;
 
-    } catch (error) {
-        console.error('❌ Download Error:', error.message);
-        res.status(500).send(toSmallCaps('Download failed: Could not retrieve file from Telegram.'));
+        // Redirect to the file URL forcing download
+        res.set({
+            'Content-Disposition': `attachment; filename="${fileData.fileName}"`,
+            'Content-Type': fileData.fileMimeType
+        });
+        res.redirect(302, fileUrl);
+
+    } catch (e) {
+        console.error('Error handling download:', e.message);
+        res.status(500).send('Error retrieving file');
     }
 });
 
+// Stream endpoint (Handles Range requests for seeking)
+app.get('/stream/:id', async (req, res) => {
+    const id = req.params.id;
+    const fileData = FILE_DATABASE.get(id);
 
-// ============================================
-// START SERVER AND MAINTENANCE LOOP
-// ============================================
+    if (!fileData) {
+        return res.status(404).send('File not found');
+    }
 
-app.listen(PORT, () => {
-    console.log('═══════════════════════════════════════');
-    console.log(`🎬 ${toSmallCaps('BeatAnimes Link Generator Bot')}`);
-    console.log('═══════════════════════════════════════');
-    console.log(`✅ ${toSmallCaps('Server running on port')} ${PORT}`);
-    console.log(`📡 ${toSmallCaps('URL')}: ${WEBAPP_URL}`);
-    console.log(`👑 ${toSmallCaps('Admins')}: ${ADMIN_IDS.length}`);
-    console.log(`🤖 ${toSmallCaps('Bot is ready!')}`);
-    console.log(`🔗 ${toSmallCaps('Mandatory Channels')}: ${CONFIG_STATE.FORCE_SUB_CHANNEL_IDS.length}`);
-    console.log('═══════════════════════════════════════');
-});
+    try {
+        // Track view/stream start
+        ANALYTICS.totalViews++;
+        fileData.views++;
+        fileData.lastAccessed = Date.now();
 
-// Maintenance: Clean up expired cache every hour
-setInterval(() => {
-    const now = Date.now();
-    let cleaned = 0;
-    
-    for (const [key, value] of URL_CACHE.entries()) {
-        if (now - value.timestamp > URL_CACHE_DURATION) {
-            URL_CACHE.delete(key);
-            cleaned++;
+        const fileUrl = await getFreshFileUrl(fileData);
+        const range = req.headers.range;
+        const fileSize = fileData.fileSize;
+        const fileMimeType = fileData.fileMimeType || 'video/mp4';
+
+        if (range) {
+            const parts = range.replace(/bytes=/, '').split('-');
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+            const contentLength = (end - start) + 1;
+
+            const headers = {
+                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+                'Accept-Ranges': 'bytes',
+                'Content-Length': contentLength,
+                'Content-Type': fileMimeType
+            };
+
+            // Use node-fetch to make a sub-request for the specific range
+            const fileStream = await fetch(fileUrl, {
+                headers: { Range: `bytes=${start}-${end}` }
+            });
+
+            res.writeHead(206, headers); // 206 Partial Content
+            fileStream.body.pipe(res);
+
+        } else {
+            // Full stream request
+            const headers = {
+                'Content-Length': fileSize,
+                'Content-Type': fileMimeType
+            };
+
+            const fileStream = await fetch(fileUrl);
+            res.writeHead(200, headers);
+            fileStream.body.pipe(res);
         }
+    } catch (error) {
+        console.error('Error handling stream:', error.message);
+        res.status(500).send('Error retrieving file for streaming');
     }
-    
-    if (cleaned > 0) {
-        console.log(`🧹 ${toSmallCaps('Cleaned')} ${cleaned} ${toSmallCaps('expired cache entries')}`);
-    }
-}, 60 * 60 * 1000); // 1 hour
+});
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log(`\n⏸️ ${toSmallCaps('Shutting down gracefully...')}`);
-    bot.stopPolling();
-    process.exit(0);
+// Start the Express Server
+app.listen(PORT, () => {
+    console.log(`🚀 Web server listening on port ${PORT} (WEBAPP_URL: ${WEBAPP_URL})`);
 });
